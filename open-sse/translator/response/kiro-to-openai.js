@@ -26,6 +26,12 @@ export function kiroToOpenAIResponse(chunk, state) {
 
   // If chunk is already in OpenAI format (from executor transform), return as-is
   if (chunk.object === "chat.completion.chunk" && chunk.choices) {
+    // Track finish reason so stream.js TRANSLATE mode can inject body-based
+    // usage estimation into the final chunk forwarded to the client.
+    const finishReason = chunk.choices?.[0]?.finish_reason;
+    if (finishReason) {
+      state.finishReason = finishReason;
+    }
     return chunk;
   }
   

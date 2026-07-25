@@ -65,6 +65,8 @@ export default function ProviderDetailPage() {
   const [connectionPage, setConnectionPage] = useState(1);
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
+  const [bulkEndpoint, setBulkEndpoint] = useState("codewhisperer");
+  const [bulkUpdatingEndpoint, setBulkUpdatingEndpoint] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
@@ -941,6 +943,27 @@ export default function ProviderDetailPage() {
     return applyProxyAssignments(targets);
   };
 
+  const applyEndpointToAll = async (kiroEndpoint) => {
+    if (connections.length === 0) return;
+    setBulkUpdatingEndpoint(true);
+    try {
+      const results = await Promise.allSettled(
+        connections.map((c) =>
+          fetch(`/api/providers/${c.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ providerSpecificData: { kiroEndpoint } }),
+          })
+        )
+      );
+      const failed = results.filter((r) => r.status === "rejected" || !r.value?.ok).length;
+      if (failed > 0) alert(`Set endpoint with ${failed} failed request(s).`);
+      await fetchConnections();
+    } finally {
+      setBulkUpdatingEndpoint(false);
+    }
+  };
+
 
   const isSelected = (connectionId) => selectedConnectionIds.includes(connectionId);
 
@@ -963,6 +986,7 @@ export default function ProviderDetailPage() {
                 connection={conn}
                 proxyPools={proxyPools}
                 isOAuth={isOAuth}
+                providerId={providerId}
                 isFirst={index === 0}
                 isLast={index === connections.length - 1}
                 onMoveUp={() => handleSwapPriority(index, index - 1)}
@@ -989,6 +1013,24 @@ export default function ProviderDetailPage() {
                     }
                   } catch (error) {
                     console.log("Error updating proxy:", error);
+                  }
+                }}
+                onUpdateEndpoint={async (kiroEndpoint) => {
+                  try {
+                    const res = await fetch(`/api/providers/${conn.id}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ providerSpecificData: { kiroEndpoint } }),
+                    });
+                    if (res.ok) {
+                      setConnections(prev => prev.map(c =>
+                        c.id === conn.id
+                          ? { ...c, providerSpecificData: { ...c.providerSpecificData, kiroEndpoint } }
+                          : c
+                      ));
+                    }
+                  } catch (error) {
+                    console.log("Error updating endpoint:", error);
                   }
                 }}
                 onEdit={() => {
@@ -1430,6 +1472,31 @@ export default function ProviderDetailPage() {
                 >
                   Apply Proxy
                 </Button>
+              )}
+              {/* Endpoint + Set All — Kiro only */}
+              {providerId === "kiro" && connections.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-text-muted font-medium">Endpoint</span>
+                  <select
+                    value={bulkEndpoint}
+                    onChange={(e) => setBulkEndpoint(e.target.value)}
+                    disabled={bulkUpdatingEndpoint}
+                    className="text-xs px-2 py-1 border border-border rounded-md bg-background focus:outline-none focus:border-primary"
+                  >
+                    <option value="codewhisperer">CodeWhisperer</option>
+                    <option value="amazonq">AmazonQ</option>
+                    <option value="amazonq-cli">AmazonQ CLI</option>
+                  </select>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="done_all"
+                    onClick={() => applyEndpointToAll(bulkEndpoint)}
+                    disabled={bulkUpdatingEndpoint || connections.length === 0}
+                  >
+                    {bulkUpdatingEndpoint ? "Applying..." : "Set All"}
+                  </Button>
+                </div>
               )}
               {connections.length > 0 && (
                 <>

@@ -1,5 +1,5 @@
 import { BaseExecutor } from "./base.js";
-import { PROVIDERS } from "../config/providers.js";
+import { PROVIDERS, resolveKiroEndpoint } from "../config/providers.js";
 import { randomUUID } from "node:crypto";
 import { resolveKiroModel } from "../config/kiroConstants.js";
 import { refreshKiroToken } from "../services/tokenRefresh.js";
@@ -210,6 +210,9 @@ function inspectSSEChunk(chunk, state) {
 /**
  * KiroExecutor - Executor for Kiro AI (AWS CodeWhisperer)
  * Uses AWS CodeWhisperer streaming API with AWS EventStream binary format
+ *
+ * Endpoint is selected per-connection via providerSpecificData.kiroEndpoint.
+ * See KIRO_ENDPOINTS in config/providers.js for the available variants.
  */
 export class KiroExecutor extends BaseExecutor {
   constructor() {
@@ -217,8 +220,12 @@ export class KiroExecutor extends BaseExecutor {
   }
 
   buildHeaders(credentials, stream = true) {
+    const endpoint = resolveKiroEndpoint(credentials);
     const headers = {
       ...this.config.headers,
+      "x-amzn-kiro-agent-mode": endpoint.agentMode,
+      "User-Agent": endpoint.userAgent,
+      "X-Amz-User-Agent": endpoint.xAmzUserAgent,
       "Amz-Sdk-Request": "attempt=1; max=3",
       "Amz-Sdk-Invocation-Id": randomUUID()
     };
@@ -286,11 +293,43 @@ export class KiroExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    const endpoint = resolveKiroEndpoint(credentials);
+    
+    // For amazonq-cli, use the specific endpoint URL directly
+    if (endpoint.key === "amazonq-cli") {
+      return endpoint.url;
+    }
+    
+    // For other endpoints, use baseUrls fallback
     const baseUrls = this.getOrderedBaseUrls(credentials);
     return baseUrls[urlIndex] || baseUrls[0] || this.config.baseUrl;
   }
 
   transformRequest(model, body, stream, credentials) {
+    const endpoint = resolveKiroEndpoint(credentials);
+    
+    // AmazonQ CLI specific transformations
+    if (endpoint.key === "amazonq-cli") {
+      // Set origin to "CLI" for AmazonQ CLI endpoint
+      if (body?.conversationState?.currentMessage?.userInputMessage) {
+        body.conversationState.currentMessage.userInputMessage.origin = "CLI";
+      }
+      // Also set for history messages
+      if (body?.conversationState?.history) {
+        for (const msg of body.conversationState.history) {
+          if (msg.userInputMessage) {
+            msg.userInputMessage.origin = "CLI";
+          }
+        }
+      }
+      
+      // Remove unsupported fields
+      if (body?.conversationState) {
+        delete body.conversationState.agentContinuationId;
+        delete body.conversationState.agentTaskType;
+      }
+    }
+    
     return body;
   }
 
@@ -600,6 +639,7 @@ export class KiroExecutor extends BaseExecutor {
       contextUsagePercentage: 0,
       hasContextUsage: false,
       hasMetering: false,
+      hasRealUsage: false,
       usage: null,
       inThinking: false,
       toolValidationError: null,
@@ -845,6 +885,8 @@ export class KiroExecutor extends BaseExecutor {
           const cacheCreate = Number(metrics.cacheCreationInputTokens || metrics.cache_creation_input_tokens) || 0;
           if (cacheRead) state.usage.cache_read_input_tokens = cacheRead;
           if (cacheCreate) state.usage.cache_creation_input_tokens = cacheCreate;
+          // Track that we got real usage from upstream (not estimated)
+          state.hasRealUsage = true;
         }
       }
       return true;
@@ -1021,7 +1063,12 @@ export class KiroExecutor extends BaseExecutor {
         : disposition === "length"
           ? "length"
           : "stop";
-      controller.enqueue(sseChunk({}, finishReason, state.usage));
+      // Only include usage when we have REAL data from metricsEvent.
+      // When usage is estimated (no metricsEvent), leave it out so that
+      // stream.js TRANSLATE mode can estimate from the full request body,
+      // which includes all prior messages in the session.
+      const finalUsage = state.hasRealUsage ? state.usage : null;
+      controller.enqueue(sseChunk({}, finishReason, finalUsage));
       controller.enqueue(encoder.encode(SSE_DONE));
       state.finished = true;
       options.onTerminalState?.(diagnostics({

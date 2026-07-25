@@ -5,10 +5,23 @@ import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/c
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
 
-export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
+const KIRO_ENDPOINT_OPTIONS = [
+  { value: "codewhisperer", label: "CodeWhisperer" },
+  { value: "amazonq", label: "AmazonQ" },
+  { value: "amazonq-cli", label: "AmazonQ CLI" },
+];
+const KIRO_ENDPOINT_LABELS = Object.fromEntries(KIRO_ENDPOINT_OPTIONS.map(o => [o.value, o.label]));
+
+export default function ConnectionRow({ connection, proxyPools, isOAuth, providerId, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onUpdateEndpoint, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
+  const [showEndpointDropdown, setShowEndpointDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
+  const [updatingEndpoint, setUpdatingEndpoint] = useState(false);
   const proxyDropdownRef = useRef(null);
+  const endpointDropdownRef = useRef(null);
+  const isKiro = providerId === "kiro";
+  const currentEndpoint = connection.providerSpecificData?.kiroEndpoint || "codewhisperer";
+  const currentEndpointLabel = KIRO_ENDPOINT_LABELS[currentEndpoint] || "CodeWhisperer";
 
   const proxyPoolMap = new Map((proxyPools || []).map((pool) => [pool.id, pool]));
   const boundProxyPoolId = connection.providerSpecificData?.proxyPoolId || null;
@@ -58,6 +71,17 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     return () => document.removeEventListener("mousedown", handler);
   }, [showProxyDropdown]);
 
+  useEffect(() => {
+    if (!showEndpointDropdown) return;
+    const handler = (e) => {
+      if (endpointDropdownRef.current && !endpointDropdownRef.current.contains(e.target)) {
+        setShowEndpointDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showEndpointDropdown]);
+
   const handleSelectProxy = async (poolId) => {
     setUpdatingProxy(true);
     try {
@@ -65,6 +89,20 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     } finally {
       setUpdatingProxy(false);
       setShowProxyDropdown(false);
+    }
+  };
+
+  const handleSelectEndpoint = async (value) => {
+    if (value === currentEndpoint) {
+      setShowEndpointDropdown(false);
+      return;
+    }
+    setUpdatingEndpoint(true);
+    try {
+      await onUpdateEndpoint?.(value);
+    } finally {
+      setUpdatingEndpoint(false);
+      setShowEndpointDropdown(false);
     }
   };
 
@@ -213,7 +251,41 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
         </div>
       </div>
       <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
-        <div className="grid flex-1 grid-cols-3 gap-1 sm:flex sm:flex-none">
+        <div className={`grid flex-1 gap-1 sm:flex sm:flex-none ${isKiro ? "grid-cols-4" : "grid-cols-3"}`}>
+          {/* Endpoint button with inline dropdown — Kiro only */}
+          {isKiro && (
+            <div className="relative" ref={endpointDropdownRef}>
+              <button
+                onClick={() => setShowEndpointDropdown((v) => !v)}
+                className="flex w-full flex-col items-center rounded px-2 py-1 text-text-muted transition-colors hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                disabled={updatingEndpoint}
+                title={`Current endpoint: ${currentEndpointLabel}`}
+              >
+                <span className="material-symbols-outlined text-[18px]">
+                  {updatingEndpoint ? "progress_activity" : "public"}
+                </span>
+                <span className="text-[10px] leading-tight truncate max-w-[60px]">
+                  {currentEndpointLabel}
+                </span>
+              </button>
+              {showEndpointDropdown && (
+                <div className="absolute right-0 top-full z-50 mt-1 max-w-[78vw] min-w-[180px] rounded-lg border border-border bg-bg py-1 shadow-lg">
+                  {KIRO_ENDPOINT_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => handleSelectEndpoint(opt.value)}
+                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${currentEndpoint === opt.value ? "text-primary font-medium" : "text-text-main"}`}
+                    >
+                      {opt.label}
+                      {currentEndpoint === opt.value && (
+                        <span className="material-symbols-outlined ml-1 text-[14px] align-middle">check</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {/* Proxy button with inline dropdown */}
           {(proxyPools || []).length > 0 && (
             <div className="relative" ref={proxyDropdownRef}>
