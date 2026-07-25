@@ -274,6 +274,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("1");
   const [confirmState, setConfirmState] = useState(null);
+  const [selectedIds, setSelectedIds] = useState(new Set());
 
   const fetch_ = useCallback(async () => {
     try {
@@ -366,6 +367,54 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
     } catch (e) { console.log("update connection error:", e); }
   };
 
+  const handleSelectConnection = (id, checked) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const handleSelectAll = (checked) => {
+    if (checked) setSelectedIds(new Set(connections.map((c) => c.id)));
+    else setSelectedIds(new Set());
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setConfirmState({
+      title: "Delete Selected Connections",
+      message: `Delete ${selectedIds.size} connection(s)?`,
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          await Promise.all([...selectedIds].map((id) => fetch(`/api/providers/${id}`, { method: "DELETE" })));
+          setConnections((prev) => prev.filter((c) => !selectedIds.has(c.id)));
+          setSelectedIds(new Set());
+        } catch (e) { console.log("bulk delete error:", e); }
+      }
+    });
+  };
+
+  const handleBulkEnable = async () => {
+    if (selectedIds.size === 0) return;
+    try {
+      await Promise.all([...selectedIds].map((id) => fetch(`/api/providers/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ isActive: true }) })));
+      setConnections((prev) => prev.map((c) => selectedIds.has(c.id) ? { ...c, isActive: true } : c));
+      setSelectedIds(new Set());
+    } catch (e) { console.log("bulk enable error:", e); }
+  };
+
+  const handleBulkDisable = async () => {
+    if (selectedIds.size === 0) return;
+    try {
+      await Promise.all([...selectedIds].map((id) => fetch(`/api/providers/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ isActive: false }) })));
+      setConnections((prev) => prev.map((c) => selectedIds.has(c.id) ? { ...c, isActive: false } : c));
+      setSelectedIds(new Set());
+    } catch (e) { console.log("bulk disable error:", e); }
+  };
+
   if (loading) return <Card><div className="h-20 animate-pulse bg-black/5 rounded-lg" /></Card>;
 
   return (
@@ -404,6 +453,34 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
           </div>
         ) : (
           <>
+            {/* Bulk actions bar */}
+            {connections.length > 0 && (
+              <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-black/[0.03] pb-3 dark:border-white/[0.03]">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.size === connections.length && connections.length > 0}
+                  onChange={(e) => handleSelectAll(e.target.checked)}
+                  className="w-4 h-4 rounded border-border text-primary focus:ring-primary focus:ring-offset-0"
+                  title="Select All"
+                />
+                <span className="text-xs text-text-muted">
+                  {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select All"}
+                </span>
+                {selectedIds.size > 0 && (
+                  <div className="flex flex-wrap gap-2 ml-auto">
+                    <Button size="sm" variant="secondary" icon="check_circle" onClick={handleBulkEnable}>
+                      Enable
+                    </Button>
+                    <Button size="sm" variant="secondary" icon="cancel" onClick={handleBulkDisable}>
+                      Disable
+                    </Button>
+                    <Button size="sm" variant="danger" icon="delete" onClick={handleBulkDelete}>
+                      Delete
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex flex-col divide-y divide-black/[0.03] dark:divide-white/[0.03]">
               {connections.map((conn, idx) => (
                 <ConnectionRow
@@ -411,6 +488,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
                   connection={conn}
                   proxyPools={proxyPools}
                   isOAuth={isOAuth}
+                  providerId={providerId}
                   isFirst={idx === 0}
                   isLast={idx === connections.length - 1}
                   onMoveUp={() => handleSwapPriority(idx, idx - 1)}
@@ -419,6 +497,8 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
                   onUpdateProxy={(poolId) => handleUpdateProxy(conn.id, poolId)}
                   onEdit={() => { setSelectedConnection(conn); setShowEditModal(true); }}
                   onDelete={() => handleDelete(conn.id)}
+                  isSelected={selectedIds.has(conn.id)}
+                  onSelect={handleSelectConnection}
                 />
               ))}
             </div>

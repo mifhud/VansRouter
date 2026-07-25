@@ -12,7 +12,7 @@ const KIRO_ENDPOINT_OPTIONS = [
 ];
 const KIRO_ENDPOINT_LABELS = Object.fromEntries(KIRO_ENDPOINT_OPTIONS.map(o => [o.value, o.label]));
 
-export default function ConnectionRow({ connection, proxyPools, isOAuth, providerId, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onUpdateEndpoint, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
+export default function ConnectionRow({ connection, proxyPools, isOAuth, providerId, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onUpdateEndpoint, onEdit, onDelete, oneByOneStatus = null, autoPing = null, isSelected = false, onSelect = null }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [showEndpointDropdown, setShowEndpointDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
@@ -178,6 +178,15 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
   return (
     <div className={`group flex min-w-0 flex-col gap-3 rounded-lg p-2 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between ${connection.isActive === false ? "opacity-60" : ""}`}>
       <div className="flex min-w-0 flex-1 items-start gap-2 sm:items-center sm:gap-3">
+        {/* Checkbox for bulk selection */}
+        {onSelect && (
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={(e) => onSelect(connection.id, e.target.checked)}
+            className="shrink-0 w-4 h-4 rounded border-border text-primary focus:ring-primary focus:ring-offset-0"
+          />
+        )}
         {/* Priority arrows */}
         <div className="flex shrink-0 flex-col">
           <button

@@ -751,6 +751,52 @@ export default function ProviderDetailPage() {
     });
   };
 
+  const handleBulkEnable = async () => {
+    const count = selectedConnectionIds.length;
+    if (count === 0) return;
+    let failed = 0;
+    const idsToEnable = [...selectedConnectionIds];
+    for (const id of idsToEnable) {
+      try {
+        const res = await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: true })
+        });
+        if (!res.ok) failed += 1;
+      } catch (error) {
+        console.log("Error enabling connection:", error);
+        failed += 1;
+      }
+    }
+    setConnections(prev => prev.map(c => idsToEnable.includes(c.id) ? { ...c, isActive: true } : c));
+    setSelectedConnectionIds([]);
+    if (failed > 0) alert(`Enabled ${idsToEnable.length - failed} connection(s), ${failed} failed.`);
+  };
+
+  const handleBulkDisable = async () => {
+    const count = selectedConnectionIds.length;
+    if (count === 0) return;
+    let failed = 0;
+    const idsToDisable = [...selectedConnectionIds];
+    for (const id of idsToDisable) {
+      try {
+        const res = await fetch(`/api/providers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isActive: false })
+        });
+        if (!res.ok) failed += 1;
+      } catch (error) {
+        console.log("Error disabling connection:", error);
+        failed += 1;
+      }
+    }
+    setConnections(prev => prev.map(c => idsToDisable.includes(c.id) ? { ...c, isActive: false } : c));
+    setSelectedConnectionIds([]);
+    if (failed > 0) alert(`Disabled ${idsToDisable.length - failed} connection(s), ${failed} failed.`);
+  };
+
   const handleOAuthSuccess = () => {
     fetchConnections();
     setShowOAuthModal(false);
@@ -1501,14 +1547,32 @@ export default function ProviderDetailPage() {
               {connections.length > 0 && (
                 <>
                   {selectedConnectionIds.length > 0 && (
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      icon="delete"
-                      onClick={handleBulkDelete}
-                    >
-                      Delete Selected ({selectedConnectionIds.length})
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon="check_circle"
+                        onClick={handleBulkEnable}
+                      >
+                        Enable Selected ({selectedConnectionIds.length})
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon="cancel"
+                        onClick={handleBulkDisable}
+                      >
+                        Disable Selected ({selectedConnectionIds.length})
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        icon="delete"
+                        onClick={handleBulkDelete}
+                      >
+                        Delete Selected ({selectedConnectionIds.length})
+                      </Button>
+                    </>
                   )}
                   <Button
                     size="sm"
