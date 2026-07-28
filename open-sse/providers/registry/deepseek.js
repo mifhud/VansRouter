@@ -25,6 +25,12 @@ export default {
     reasoningInject: {
       scope: "all",
     },
+    // DeepSeek reasoning models can have long pauses during thinking phase.
+    stallTimeoutMs: 600 * 1000, // 10 minutes
+    timeoutMs: 300 * 1000, // 5 minutes connect timeout
+    retry: {
+      502: { attempts: 3, delayMs: 2000 },
+    },
   },
   // Multi-endpoint: pick the transport matching client sourceFormat to skip translation.
   transports: [

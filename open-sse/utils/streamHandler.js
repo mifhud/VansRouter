@@ -77,7 +77,13 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
         return;
       }
 
-      logStream(`error: ${error.message}`);
+      // Log full error details for debugging
+      const errMsg = error.message || String(error);
+      const errName = error.name || "Error";
+      const errStack = error.stack ? `\n${error.stack}` : "";
+      console.error(`[${getTimeString()}] ❌ [STREAM ERROR] ${provider}/${model} | ${errName}: ${errMsg}${errStack}`);
+      
+      logStream(`error: ${errMsg}`);
       onError?.(error);
     },
 
@@ -131,7 +137,13 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         // Controller already closed = downstream ended; not an upstream error, skip noisy log.
         const msg0 = error?.message || "";
         const isControllerClosed = msg0.includes("already closed") || msg0.includes("Invalid state");
-        if (!isControllerClosed) streamController.handleError(error);
+        
+        // Debug log for all errors except controller-closed
+        if (!isControllerClosed) {
+          dbg("STREAM", `transform error | msg="${msg0}" | name=${error?.name} | code=${error?.code || error?.cause?.code || "none"} | connected=${wasConnected}`);
+          streamController.handleError(error);
+        }
+        
         reader.cancel().catch(() => {});
         writer.abort().catch(() => {});
 
@@ -199,6 +211,8 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   };
   const armStall = () => {
     clearStall();
+    // stallTimeoutMs === 0 disables stall timeout entirely
+    if (stallTimeoutMs === 0) return;
     stallTimer = setTimeout(() => {
       stallTimer = null;
       dbg(tag, `STALL TIMEOUT ${stallTimeoutMs}ms | chunks=${chunkCount} | bytes=${totalBytes} | sinceLast=${Date.now() - lastChunkAt}ms`);

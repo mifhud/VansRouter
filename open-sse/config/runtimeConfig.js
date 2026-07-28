@@ -31,12 +31,13 @@ export const MEMORY_CONFIG = {
   proxyDispatchersMaxSize: 20,
 };
 
-// Parse a positive integer env override, falling back to a default.
+// Parse a non-negative integer env override, falling back to a default.
+// 0 is valid (disables timeout), negative values fallback to default.
 function envMs(name, def) {
   const raw = process.env[name];
   if (raw == null || raw === "") return def;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : def;
+  return Number.isFinite(n) && n >= 0 ? n : def;
 }
 
 function envUrl(name, def) {
@@ -78,11 +79,21 @@ export const RETRY_CONFIG = {
 
 // Default retry config by status code: { attempts, delayMs }
 // Backward compat: if value is a number, treated as attempts with RETRY_CONFIG.delayMs
+// Env overrides: NETWORK_RETRY_502_ATTEMPTS, NETWORK_RETRY_502_DELAY_MS, etc.
 export const DEFAULT_RETRY_CONFIG = {
   429: { attempts: 0, delayMs: 0 },
-  502: { attempts: 3, delayMs: 3000 },
-  503: { attempts: 3, delayMs: 2000 },
-  504: { attempts: 2, delayMs: 3000 }
+  502: { 
+    attempts: envMs("NETWORK_RETRY_502_ATTEMPTS", 3), 
+    delayMs: envMs("NETWORK_RETRY_502_DELAY_MS", 3000) 
+  },
+  503: { 
+    attempts: envMs("NETWORK_RETRY_503_ATTEMPTS", 3), 
+    delayMs: envMs("NETWORK_RETRY_503_DELAY_MS", 2000) 
+  },
+  504: { 
+    attempts: envMs("NETWORK_RETRY_504_ATTEMPTS", 2), 
+    delayMs: envMs("NETWORK_RETRY_504_DELAY_MS", 3000) 
+  }
 };
 
 // Normalize a retry entry to { attempts, delayMs }
