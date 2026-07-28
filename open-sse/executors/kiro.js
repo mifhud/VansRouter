@@ -726,7 +726,17 @@ export class KiroExecutor extends BaseExecutor {
     };
     const emitTools = (controller) => {
       for (const tool of state.tools.values()) {
-        const input = parsedToolInput(tool);
+        let input;
+        try {
+          input = parsedToolInput(tool);
+        } catch {
+          input = {
+            _error: "Tool input truncated by Kiro API (output token limit exceeded)",
+            _partialInput: tool.inputKind === "string"
+              ? (tool.inputChunks?.join("") || "").substring(0, 500)
+              : JSON.stringify(tool.inputObject || {}).substring(0, 500)
+          };
+        }
         if (tool.name === "tool_call") {
           if (typeof input.name !== "string" || !input.name.trim()) {
             throw new Error("Invalid Kiro tool_call payload: missing nested MCP tool name");
@@ -942,8 +952,6 @@ export class KiroExecutor extends BaseExecutor {
           const bufferExceeded = error.code === "KIRO_BUFFER_EXCEEDED";
           if (!bufferExceeded) {
             state.toolValidationError ||= error.message;
-            state.tools.clear();
-            state.bufferedToolBytes = 0;
             continue;
           }
           fail(
@@ -975,7 +983,7 @@ export class KiroExecutor extends BaseExecutor {
       }
       state.transportState = "clean_eof";
       const declaredDisposition = stopDisposition(state.stopReason, state.sawToolUse);
-      if (["retryable_protocol_failure", "terminal_incomplete", "terminal_refusal", "unknown_failure"].includes(declaredDisposition)) {
+      if (["retryable_protocol_failure", "terminal_refusal", "unknown_failure"].includes(declaredDisposition)) {
         const code = declaredDisposition === "retryable_protocol_failure"
           ? "kiro_retryable_protocol_failure"
           : declaredDisposition === "terminal_refusal"
@@ -993,14 +1001,7 @@ export class KiroExecutor extends BaseExecutor {
         return;
       }
       if (state.toolValidationError) {
-        fail(
-          controller,
-          "invalid_tool_call",
-          "invalid_kiro_tool_call",
-          state.toolValidationError,
-          { transport_state: state.transportState, stop_disposition: "retryable_protocol_failure" }
-        );
-        return;
+        emitDelta(controller, { content: `\n\n⚠️ Tool input was truncated by Kiro API. The output may be incomplete due to token limits.` });
       }
       try {
         emitTools(controller);
@@ -1028,7 +1029,7 @@ export class KiroExecutor extends BaseExecutor {
       }
 
       const disposition = stopDisposition(state.stopReason, state.hasToolCalls);
-      if (["retryable_protocol_failure", "terminal_incomplete", "terminal_refusal", "unknown_failure"].includes(disposition)) {
+      if (["retryable_protocol_failure", "terminal_refusal", "unknown_failure"].includes(disposition)) {
         const code = disposition === "retryable_protocol_failure"
           ? "kiro_retryable_protocol_failure"
           : disposition === "terminal_refusal"

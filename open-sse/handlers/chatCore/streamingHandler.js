@@ -10,62 +10,6 @@ import { buildRequestDetail, extractRequestConfig, saveUsageStats } from "./requ
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 
-const STREAM_EARLY_EOF_STATUS = 502;
-
-/**
- * Peek the first chunk of a ReadableStream to detect early EOF.
- * If the stream closes before any byte arrives, return { empty: true }.
- * Otherwise return the first chunk + the reader so the caller can
- * reconstruct a stream that still contains that first chunk.
- */
-async function peekStreamReadiness(body) {
-  if (!body || typeof body.getReader !== "function") {
-    return { empty: true };
-  }
-  const reader = body.getReader();
-  try {
-    const { done, value } = await reader.read();
-    if (done) {
-      return { empty: true };
-    }
-    return { empty: false, firstChunk: value, reader };
-  } catch (error) {
-    reader.cancel?.().catch(() => {});
-    throw error;
-  }
-}
-
-/**
- * Reconstruct a ReadableStream from a peeked first chunk + remaining reader.
- */
-function reconstructStream({ firstChunk, reader }) {
-  let enqueuedFirst = false;
-  return new ReadableStream({
-    async pull(controller) {
-      if (!enqueuedFirst) {
-        controller.enqueue(firstChunk);
-        enqueuedFirst = true;
-        return;
-      }
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          controller.close();
-          reader.releaseLock?.();
-        } else {
-          controller.enqueue(value);
-        }
-      } catch (error) {
-        controller.error(error);
-        reader.cancel?.().catch(() => {});
-      }
-    },
-    cancel(reason) {
-      reader.cancel?.(reason).catch(() => {});
-    }
-  });
-}
-
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
 // Gemini-family all map to ANTIGRAVITY decoder; unknown sources fall back to OPENAI.
 const CODEX_SOURCE_TO_TARGET = {
@@ -100,8 +44,7 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
- * Includes a readiness gate: if upstream closes before any byte arrives,
- * return STREAM_EARLY_EOF so the caller can retry once on the same connection.
+ * Direct stream consumption like Kiro-account-manager (no readiness gate).
  */
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, apiKeyName, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, streamController, onStreamComplete, streamDetailId, pxpipe }) {
   if (onRequestSuccess) {
@@ -120,42 +63,13 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     console.warn('[STREAM] ' + provider + ' | ' + model + ' | unexpected Content-Type: ' + upstreamContentType);
   }
 
-  // Readiness gate: peek the first chunk before committing to the streaming
-  // response. If upstream closes before any byte arrives, signal STREAM_EARLY_EOF
-  // so chat.js can retry once on the same connection without marking it down.
-  let peek;
-  try {
-    peek = await peekStreamReadiness(providerResponse.body);
-  } catch (error) {
-    return {
-      success: false,
-      status: 502,
-      errorCode: "STREAM_EARLY_EOF",
-      error: error?.message || String(error)
-    };
-  }
-
-  if (peek.empty) {
-    return {
-      success: false,
-      status: STREAM_EARLY_EOF_STATUS,
-      errorCode: "STREAM_EARLY_EOF",
-      error: "Upstream closed stream before any useful content"
-    };
-  }
-
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey });
 
   // Responses passthrough: synthesize response.failed + [DONE] if the stream aborts/stalls before a terminal event
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const reconstructedResponse = new Response(reconstructStream(peek), {
-    status: providerResponse.status,
-    statusText: providerResponse.statusText,
-    headers: providerResponse.headers
-  });
-  const transformedBody = pipeWithDisconnect(reconstructedResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId, apiKey, apiKeyName,

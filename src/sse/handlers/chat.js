@@ -316,10 +316,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastError = null;
   let lastStatus = null;
   let lastExcludedConnectionId = null;
-  // Bug #3758: per-request counter bounding the early-close (STREAM_EARLY_EOF)
-  // re-attempt to exactly one for the whole request. Declared outside the
-  // credential retry loop so it can never reset and loop.
-  let streamEarlyEofRetries = 0;
   // Cooldown-aware retry: when ALL accounts are rate-limited with a near-term
   // retryAfter, wait briefly (<=30s) and retry the whole credential loop once
   // instead of immediately returning 503. Bounded to 1 retry per request.
@@ -480,16 +476,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     if (result.success) return withSelectedConnectionHeader(result.response, credentials.connectionId); // sets X-VansRoute-Selected-Connection-Id
-
-    // STREAM_EARLY_EOF: flaky upstream sent HTTP 200 then closed the SSE before
-    // any useful content frame. Transient upstream glitch — retry once on the
-    // SAME connection without marking it unavailable. The finally block above
-    // already released the semaphore slot; the loop will re-acquire on re-entry.
-    if (result.errorCode === "STREAM_EARLY_EOF" && streamEarlyEofRetries < 1) {
-      streamEarlyEofRetries++;
-      log.warn("STREAM", `${provider}/${model} closed stream before useful content — retrying once (attempt ${streamEarlyEofRetries})`);
-      continue;
-    }
 
     // Normalize result.error to a string before passing to pattern matchers.
     // Some upstream paths may return an Error instance; JSON.stringify(new Error())
