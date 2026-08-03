@@ -43,10 +43,68 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 }
 
 /**
+ * Wrap a ReadableStream so mid-stream "terminated" errors trigger a transparent
+ * retry inside the stream pipeline. The downstream consumer sees a seamless
+ * continuation (or a graceful close when retries are exhausted).
+ */
+function createRetryAwareStream(sourceStream, { maxRetries, retryDelay, retryExecutor, buildStream, provider, model, reqLogger }) {
+  let reader = sourceStream.getReader();
+  let attempts = 0;
+
+  return new ReadableStream({
+    async pull(controller) {
+      while (true) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) { controller.close(); return; }
+          controller.enqueue(value);
+          return;
+        } catch (error) {
+          const isTerminated = error.name === "TypeError" && error.message === "terminated";
+          if (!isTerminated || attempts >= maxRetries) {
+            // Not retryable or out of attempts — graceful close
+            if (isTerminated && attempts >= maxRetries) {
+              reqLogger?.warn?.("STREAM_RETRY", `${provider}/${model} | retries exhausted (${attempts}/${maxRetries})`);
+            }
+            controller.close();
+            return;
+          }
+
+          attempts++;
+          reqLogger?.warn?.("STREAM_RETRY", `${provider}/${model} | terminated, retry ${attempts}/${maxRetries} after ${retryDelay}ms`);
+
+          try { reader.cancel().catch(() => {}); } catch {}
+
+          await new Promise(r => setTimeout(r, retryDelay));
+
+          try {
+            const newResponse = await retryExecutor();
+            if (newResponse?.ok) {
+              const newStream = buildStream(newResponse);
+              reader = newStream.getReader();
+              continue; // retry pull from new stream
+            }
+            reqLogger?.warn?.("STREAM_RETRY", `${provider}/${model} | retryExecutor returned non-ok response`);
+          } catch (retryErr) {
+            reqLogger?.warn?.("STREAM_RETRY", `${provider}/${model} | retryExecutor failed: ${retryErr.message}`);
+          }
+
+          controller.close();
+          return;
+        }
+      }
+    },
+    cancel() {
+      reader.cancel().catch(() => {});
+    }
+  });
+}
+
+/**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  * Direct stream consumption like Kiro-account-manager (no readiness gate).
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, apiKeyName, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, streamController, onStreamComplete, streamDetailId, pxpipe }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, apiKeyName, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, streamController, onStreamComplete, streamDetailId, pxpipe, retryExecutor }) {
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -63,13 +121,41 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     console.warn('[STREAM] ' + provider + ' | ' + model + ' | unexpected Content-Type: ' + upstreamContentType);
   }
 
-  const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey });
-
   // Responses passthrough: synthesize response.failed + [DONE] if the stream aborts/stalls before a terminal event
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+
+  // Build a fresh stream pipeline on each call (used for initial + retries)
+  // When retry is configured, let the inner stream propagate "terminated" errors
+  // instead of closing gracefully — the outer retry wrapper catches them.
+  const isRetryable = retryExecutor
+    ? (error) => error.name === "TypeError" && error.message === "terminated"
+    : null;
+  const buildStream = (response) => {
+    streamController.resetForRetry();
+    const s = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey });
+    return pipeWithDisconnect(response, s, streamController, onAbortTerminal, stallTimeoutMs, isRetryable);
+  };
+
+  let transformedBody = buildStream(providerResponse);
+
+  // Wrap with retry-aware stream if retryExecutor is provided
+  if (retryExecutor) {
+    const maxRetries = parseInt(process.env.STREAM_RETRY_ATTEMPTS || "0", 10);
+    const retryDelay = parseInt(process.env.STREAM_RETRY_DELAY_MS || "2000", 10);
+    if (maxRetries > 0) {
+      transformedBody = createRetryAwareStream(transformedBody, {
+        maxRetries,
+        retryDelay,
+        retryExecutor,
+        buildStream,
+        provider,
+        model,
+        reqLogger,
+      });
+    }
+  }
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId, apiKey, apiKeyName,

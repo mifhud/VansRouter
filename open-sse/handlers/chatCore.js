@@ -533,9 +533,22 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return result;
   }
 
-  // Streaming response
+  // Streaming response with retry logic for mid-stream errors
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
-  return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat || targetFormat, userAgent, reqLogger, toolNameMap, streamController, onStreamComplete, streamDetailId, pxpipe: pxpipeSummary });
+
+  // Build a retry executor that re-fetches from upstream when the stream terminates mid-flight.
+  // The retry happens transparently inside the response body stream — the client sees
+  // a seamless continuation (or a graceful close when retries are exhausted).
+  const maxRetries = parseInt(process.env.STREAM_RETRY_ATTEMPTS || "0", 10);
+  let retryExecutor = null;
+  if (maxRetries > 0) {
+    retryExecutor = async () => {
+      const retryResult = await executor.execute({ model, body: translatedBody, stream: upstreamStream, credentials, signal: streamController.signal, log, proxyOptions, accountCount });
+      return retryResult.response;
+    };
+  }
+
+  return await handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat || targetFormat, userAgent, reqLogger, toolNameMap, streamController, onStreamComplete, streamDetailId, pxpipe: pxpipeSummary, retryExecutor });
 }
 
 export function isTokenExpiringSoon(expiresAt, bufferMs = 5 * 60 * 1000) {

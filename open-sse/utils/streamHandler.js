@@ -87,7 +87,14 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
       onError?.(error);
     },
 
-    abort: () => abortController.abort()
+    abort: () => abortController.abort(),
+
+    // Reset disconnected state for retry — called before rebuilding the stream
+    // pipeline so the new createDisconnectAwareStream sees isConnected() === true.
+    resetForRetry: () => {
+      disconnected = false;
+      if (abortTimeout) { clearTimeout(abortTimeout); abortTimeout = null; }
+    },
   };
 }
 
@@ -100,7 +107,7 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
  * for long periods while raw bytes still flow (e.g. Kiro EventStream
  * binary frames buffering, Claude reasoning streams).
  */
-export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null) {
+export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null, isRetryable = null) {
   const reader = transformStream.readable.getReader();
   const writer = transformStream.writable.getWriter();
   let terminalEmitted = false;
@@ -147,7 +154,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         reader.cancel().catch(() => {});
         writer.abort().catch(() => {});
 
-        // Treat network resets / socket hang up / abort as graceful close
+        // Treat network resets / socket hang up / abort / terminated as graceful close
         const msg = error?.message || "";
         const code = error?.code || error?.cause?.code || "";
         const isNetworkClose =
@@ -157,10 +164,18 @@ export function createDisconnectAwareStream(transformStream, streamController, o
           msg.includes("ECONNRESET") ||
           msg.includes("ETIMEDOUT") ||
           msg.includes("EPIPE") ||
+          msg.includes("terminated") ||
           code === "ECONNRESET" ||
           code === "ETIMEDOUT" ||
           code === "EPIPE" ||
           code === "UND_ERR_SOCKET";
+
+        // If the caller provided a retryable-error detector, let retryable errors
+        // propagate so an outer retry wrapper can catch and re-fetch transparently.
+        if (isRetryable?.(error)) {
+          controller.error(error);
+          return;
+        }
 
         // Graceful close on network/abort, or when a structured terminal is available
         // (Responses passthrough prefers response.failed + [DONE] over a raw transport error)
@@ -199,7 +214,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
  * @param {TransformStream} transformStream - Transform stream for SSE
  * @param {object} streamController - Stream controller from createStreamController
  */
-export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS) {
+export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, isRetryable = null) {
   let stallTimer = null;
   let chunkCount = 0;
   let totalBytes = 0;
@@ -261,7 +276,8 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   return createDisconnectAwareStream(
     { readable: transformedBody, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
     wrappedController,
-    onAbortTerminal
+    onAbortTerminal,
+    isRetryable
   );
 }
 

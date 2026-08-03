@@ -134,3 +134,8 @@ export function capRetryAttemptsByAccountCount(retryConfig, accountCount) {
 export const SKIP_PATTERNS = [
   "Please write a 5-10 word title for the following conversation:"
 ];
+
+// Stream retry config: retry mid-stream errors (e.g. DeepSeek termination)
+// Env: STREAM_RETRY_ATTEMPTS (default: 0 = disabled)
+export const STREAM_RETRY_ATTEMPTS = envMs("STREAM_RETRY_ATTEMPTS", 0);
+export const STREAM_RETRY_DELAY_MS = envMs("STREAM_RETRY_DELAY_MS", 2000);
