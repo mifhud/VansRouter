@@ -345,7 +345,7 @@ function loadDaysInRange(adapter, maxDays) {
   return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
 }
 
-export async function getUsageStats(period = "all") {
+export async function getUsageStats(period = "all", startDate = null, endDate = null) {
   const db = await getAdapter();
 
   const [{ getProviderConnections }, { getApiKeys }, { getProviderNodes }] = await Promise.all([
@@ -445,12 +445,22 @@ export async function getUsageStats(period = "all") {
     }
   }
 
-  const useDailySummary = period !== "24h" && period !== "today";
+  const hasCustomDateRange = startDate || endDate;
+  const useDailySummary = !hasCustomDateRange && period !== "24h" && period !== "today";
 
   if (useDailySummary) {
     const periodDays = { "7d": 7, "30d": 30, "60d": 60 };
     const maxDays = periodDays[period] || null;
-    const dayRows = loadDaysInRange(db, maxDays);
+    let dayRows = loadDaysInRange(db, maxDays);
+    
+    // Filter by custom date range if provided
+    if (startDate || endDate) {
+      dayRows = dayRows.filter((dr) => {
+        if (startDate && dr.dateKey < startDate) return false;
+        if (endDate && dr.dateKey > endDate) return false;
+        return true;
+      });
+    }
 
     for (const dr of dayRows) {
       const dateKey = dr.dateKey;
@@ -566,19 +576,43 @@ export async function getUsageStats(period = "all") {
       if (stats.byEndpoint[endpointKey] && new Date(ts) > new Date(stats.byEndpoint[endpointKey].lastUsed)) stats.byEndpoint[endpointKey].lastUsed = ts;
     }
   } else {
-    // 24h / today: live history
-    let cutoff;
-    if (period === "today") {
+    // 24h / today / custom date range: live history
+    let cutoff, endCutoff;
+    if (hasCustomDateRange) {
+      // Custom date range
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        cutoff = start.toISOString();
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        endCutoff = end.toISOString();
+      }
+    } else if (period === "today") {
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
       cutoff = startOfDay.toISOString();
     } else {
       cutoff = new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
     }
-    const filtered = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
-      [cutoff]
-    );
+    
+    let query = `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory`;
+    const params = [];
+    
+    if (cutoff && endCutoff) {
+      query += ` WHERE timestamp >= ? AND timestamp <= ?`;
+      params.push(cutoff, endCutoff);
+    } else if (cutoff) {
+      query += ` WHERE timestamp >= ?`;
+      params.push(cutoff);
+    } else if (endCutoff) {
+      query += ` WHERE timestamp <= ?`;
+      params.push(endCutoff);
+    }
+    
+    const filtered = db.all(query, params);
 
     for (const r of filtered) {
       const tokens = parseJson(r.tokens, {}) || {};
@@ -660,9 +694,42 @@ export async function getUsageStats(period = "all") {
   return stats;
 }
 
-export async function getChartData(period = "7d") {
+export async function getChartData(period = "7d", startDate = null, endDate = null) {
   const db = await getAdapter();
   const now = Date.now();
+
+  const hasCustomDateRange = startDate || endDate;
+
+  if (hasCustomDateRange) {
+    // Custom date range: use daily buckets
+    const start = startDate ? new Date(startDate) : new Date(0);
+    const end = endDate ? new Date(endDate) : new Date();
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+    
+    const daysDiff = Math.ceil((end - start) / 86400000) + 1;
+    const labelFn = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    
+    const dayRows = db.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ? AND dateKey <= ?`, [
+      startDate || "1970-01-01",
+      endDate || new Date().toISOString().split("T")[0]
+    ]);
+    
+    const dayMap = {};
+    for (const r of dayRows) dayMap[r.dateKey] = parseJson(r.data, {});
+    
+    return Array.from({ length: daysDiff }, (_, i) => {
+      const d = new Date(start);
+      d.setDate(d.getDate() + i);
+      const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const dayData = dayMap[dateKey];
+      return {
+        label: labelFn(d),
+        tokens: dayData ? (dayData.promptTokens || 0) + (dayData.completionTokens || 0) : 0,
+        cost: dayData ? (dayData.cost || 0) : 0,
+      };
+    });
+  }
 
   if (period === "today") {
     const bucketCount = 24;

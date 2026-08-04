@@ -83,7 +83,7 @@ const fmtTokens = (n) => {
 
 const fmtCost = (n) => `$${(n || 0).toFixed(4)}`;
 
-export default function UsageChart({ period = "7d" }) {
+export default function UsageChart({ period = "7d", startDate = "", endDate = "" }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState("tokens");
@@ -92,7 +92,11 @@ export default function UsageChart({ period = "7d" }) {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/usage/chart?period=${period}`);
+      let url = `/api/usage/chart?period=${period}`;
+      if (startDate) url += `&startDate=${startDate}`;
+      if (endDate) url += `&endDate=${endDate}`;
+      
+      const res = await fetch(url);
       if (res.ok) {
         const json = await res.json();
         setData(json);
@@ -102,13 +106,14 @@ export default function UsageChart({ period = "7d" }) {
     } finally {
       setLoading(false);
     }
-  }, [period]);
+  }, [period, startDate, endDate]);
 
   useEffect(() => {
-    if (fetchedPeriodRef.current === period) return;
-    fetchedPeriodRef.current = period;
+    const key = `${period}-${startDate}-${endDate}`;
+    if (fetchedPeriodRef.current === key) return;
+    fetchedPeriodRef.current = key;
     fetchData();
-  }, [fetchData, period]);
+  }, [fetchData, period, startDate, endDate]);
 
   const hasData = data.some((d) => d.tokens > 0 || d.cost > 0);
 

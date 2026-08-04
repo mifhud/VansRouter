@@ -282,6 +282,10 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [viewMode, setViewMode] = useState("costs");
   const [providers, setProviders] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [appliedStartDate, setAppliedStartDate] = useState("");
+  const [appliedEndDate, setAppliedEndDate] = useState("");
   const isInitialLoad = useRef(true);
   const hasLoadedStats = useRef(false);
   const period = periodProp ?? periodLocal;
@@ -328,7 +332,11 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     }
 
     const controller = new AbortController();
-    fetch(`/api/usage/stats?period=${period}`, { signal: controller.signal })
+    let url = `/api/usage/stats?period=${period}`;
+    if (appliedStartDate) url += `&startDate=${appliedStartDate}`;
+    if (appliedEndDate) url += `&endDate=${appliedEndDate}`;
+    
+    fetch(url, { signal: controller.signal })
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (controller.signal.aborted) return;
@@ -342,7 +350,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         if (!controller.signal.aborted) setLoadState({ loading: false, fetching: false });
       });
     return () => controller.abort();
-  }, [period]);
+  }, [period, appliedStartDate, appliedEndDate]);
   // SSE connection - real-time updates for activeRequests + recentRequests only
   useEffect(() => {
     const es = new EventSource("/api/usage/stream");
@@ -544,10 +552,64 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
   if (!stats && !loading) return <div className="text-text-muted">Failed to load usage statistics.</div>;
 
+  const handleSearch = () => {
+    setAppliedStartDate(startDate);
+    setAppliedEndDate(endDate);
+  };
+
+  const handleClearFilter = () => {
+    setStartDate("");
+    setEndDate("");
+    setAppliedStartDate("");
+    setAppliedEndDate("");
+  };
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
       {/* Period selector (hidden when controlled by parent) */}
       {!hidePeriodSelector && <PeriodSelector period={period} setPeriod={setPeriod} fetching={fetching} />}
+
+      {/* Date filter */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium text-text-main whitespace-nowrap">Start Date:</label>
+          <input
+            type="date"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+            className="rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/50"
+            style={{ colorScheme: 'auto' }}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium text-text-main whitespace-nowrap">End Date:</label>
+          <input
+            type="date"
+            value={endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+            className="rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/50"
+            style={{ colorScheme: 'auto' }}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSearch}
+            disabled={fetching}
+            className="px-4 py-1.5 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Search
+          </button>
+          <button
+            type="button"
+            onClick={handleClearFilter}
+            disabled={fetching}
+            className="px-4 py-1.5 rounded-lg border border-border bg-surface text-text-main text-sm font-medium hover:bg-bg-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
 
       {/* Overview cards */}
       {loading ? overviewSkeleton : <OverviewCards stats={stats} />}
@@ -566,7 +628,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       )}
 
       {/* Token / Cost chart - sync period */}
-      {loading ? chartSkeleton : <UsageChart period={period} />}
+      {loading ? chartSkeleton : <UsageChart period={period} startDate={appliedStartDate} endDate={appliedEndDate} />}
 
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">
