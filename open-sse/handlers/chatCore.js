@@ -610,7 +610,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // a seamless continuation (or a graceful close when retries are exhausted).
   const maxRetries = parseInt(process.env.STREAM_RETRY_ATTEMPTS || "0", 10);
   let retryExecutor = null;
-  if (maxRetries > 0) {
+  if (maxRetries === -1 || maxRetries > 0) {
     retryExecutor = async () => {
       const retryResult = await executor.execute({ model, body: translatedBody, stream: upstreamStream, credentials, signal: streamController.signal, log, proxyOptions, accountCount });
       return retryResult.response;

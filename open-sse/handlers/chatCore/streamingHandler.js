@@ -61,9 +61,10 @@ function createRetryAwareStream(sourceStream, { maxRetries, retryDelay, retryExe
           return;
         } catch (error) {
           const isTerminated = error.name === "TypeError" && error.message === "terminated";
-          if (!isTerminated || attempts >= maxRetries) {
+          const retriesExhausted = maxRetries !== -1 && attempts >= maxRetries;
+          if (!isTerminated || retriesExhausted) {
             // Not retryable or out of attempts — graceful close
-            if (isTerminated && attempts >= maxRetries) {
+            if (isTerminated && retriesExhausted) {
               reqLogger?.warn?.("STREAM_RETRY", `${provider}/${model} | retries exhausted (${attempts}/${maxRetries})`);
             }
             controller.close();
@@ -144,7 +145,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   if (retryExecutor) {
     const maxRetries = parseInt(process.env.STREAM_RETRY_ATTEMPTS || "0", 10);
     const retryDelay = parseInt(process.env.STREAM_RETRY_DELAY_MS || "2000", 10);
-    if (maxRetries > 0) {
+    if (maxRetries === -1 || maxRetries > 0) {
       transformedBody = createRetryAwareStream(transformedBody, {
         maxRetries,
         retryDelay,

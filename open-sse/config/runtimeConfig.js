@@ -37,7 +37,8 @@ function envMs(name, def) {
   const raw = process.env[name];
   if (raw == null || raw === "") return def;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : def;
+  // -1 = unlimited retries, 0+ = finite count
+  return Number.isFinite(n) && (n >= 0 || n === -1) ? n : def;
 }
 
 function envUrl(name, def) {
@@ -139,3 +140,13 @@ export const SKIP_PATTERNS = [
 // Env: STREAM_RETRY_ATTEMPTS (default: 0 = disabled)
 export const STREAM_RETRY_ATTEMPTS = envMs("STREAM_RETRY_ATTEMPTS", 0);
 export const STREAM_RETRY_DELAY_MS = envMs("STREAM_RETRY_DELAY_MS", 2000);
+
+/** Check if retry attempts config represents unlimited (-1). */
+export function isUnlimitedRetries(attempts) {
+  return attempts === -1;
+}
+
+/** Check if retry should happen: true when attempts is -1 (unlimited) or > 0. */
+export function shouldRetry(attempts) {
+  return attempts === -1 || attempts > 0;
+}
