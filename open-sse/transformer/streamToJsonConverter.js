@@ -30,9 +30,10 @@ function processSSEMessage(msg, state) {
   } else if (eventType === "response.completed" || eventType === "response.done") {
     state.status = "completed";
     if (parsed.response?.usage) {
-      state.usage.input_tokens = parsed.response.usage.input_tokens || 0;
-      state.usage.output_tokens = parsed.response.usage.output_tokens || 0;
-      state.usage.total_tokens = parsed.response.usage.total_tokens || 0;
+      const usage = parsed.response.usage;
+      state.usage.input_tokens = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+      state.usage.output_tokens = usage.output_tokens ?? usage.completion_tokens ?? 0;
+      state.usage.total_tokens = usage.total_tokens ?? (state.usage.input_tokens + state.usage.output_tokens);
     }
   } else if (eventType === "response.failed") {
     state.status = "failed";
@@ -71,6 +72,9 @@ export async function convertResponsesStreamToJson(stream) {
       processSSEMessage(msg, state);
     }
   }
+
+  // Flush decoder before processing the final event.
+  buffer += decoder.decode();
 
   // Flush remaining buffer (last event may not end with \n\n)
   if (buffer.trim()) {

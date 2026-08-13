@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getProviderConnectionById } from "@/models";
-import { refreshOAuthToken } from "../test/testUtils.js";
+import { refreshProviderCredentials } from "open-sse/services/oauthCredentialManager.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
 
@@ -22,7 +22,7 @@ export async function GET(request, { params }) {
     const isExpired = connection.expiresAt ? new Date(connection.expiresAt).getTime() < Date.now() : true;
     
     if (isExpired && connection.refreshToken) {
-      const refreshed = await refreshOAuthToken(connection);
+      const refreshed = await refreshProviderCredentials(connection.provider, connection);
       if (refreshed?.accessToken) {
         accessToken = refreshed.accessToken;
       }

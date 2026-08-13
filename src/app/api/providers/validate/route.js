@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { getProviderNodeById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
-import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from "open-sse/config/providers.js";
+import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS, PROVIDER_OAUTH } from "open-sse/config/providers.js";
+import { getKimchiUserAgent } from "open-sse/utils/kimchiUserAgent.js";
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
+import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
 import { cleanCookie } from "open-sse/utils/cookie.js";
 import { validateMuseSparkConnection } from "open-sse/executors/muse-spark-web.js";
@@ -255,6 +257,22 @@ export async function POST(request) {
       }
 
       switch (provider) {
+        case "qoder": {
+          try {
+            const credentials = await resolveQoderCredentials(
+              { apiKey, providerSpecificData },
+              null,
+              AbortSignal.timeout(8000),
+            );
+            const result = await resolveQoderModels(credentials, { forceRefresh: true });
+            isValid = !!result?.models?.length;
+          } catch (err) {
+            error = err.message;
+            isValid = false;
+          }
+          break;
+        }
+
         case "openai":
           const openaiRes = await fetch("https://api.openai.com/v1/models", {
             headers: { "Authorization": `Bearer ${apiKey}` },
@@ -305,8 +323,7 @@ export async function POST(request) {
         case "minimax-cn":
         case "alicode-intl":
         case "alims-intl":
-        case "alicode":
-        case "agentrouter": {
+        case "alicode": {
           // Use baseUrl from PROVIDERS (DRY); separate openai-format vs claude-format flow
           const cfg = PROVIDERS[provider];
           const isOpenAiFormat = provider === "glm-cn" || provider === "alicode" || provider === "alicode-intl" || provider === "alims-intl";
@@ -387,10 +404,11 @@ export async function POST(request) {
             // dynamic URLs (depend on providerSpecificData) — kept inline
             "ollama-local": `${resolveOllamaLocalHost({ providerSpecificData })}/api/tags`,
             "xiaomi-tokenplan": `${resolveXiaomiTokenplanBaseUrl({ providerSpecificData })}/models`,
-            "kimchi": "https://llm.kimchi.dev/openai/v1/models",
+            "kimchi": PROVIDER_OAUTH.kimchi?.modelsUrl,
           };
           const headers = {};
           if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+          if (provider === "kimchi") headers["User-Agent"] = getKimchiUserAgent();
           const res = await fetch(endpoints[provider], { headers, signal: AbortSignal.timeout(8000) });
           // xai returns 400 for bad key, 403 for valid-but-no-credit. Other providers use 401.
           if (provider === "xai") {
@@ -600,21 +618,22 @@ export async function POST(request) {
         }
 
         default: {
-          // Generic probe for OpenAI-compatible providers (config-driven from PROVIDERS)
+          // Generic probe from the registry transport. Registry metadata is the
+          // canonical provider contract; do not require a second legacy config entry.
           const cfg = PROVIDERS[provider];
-          if (!cfg || cfg.format !== "openai" || !cfg.baseUrl) {
+          if (!cfg || !cfg.baseUrl) {
             return NextResponse.json({ error: "Provider validation not supported" }, { status: 400 });
           }
           if (cfg.noAuth) {
             isValid = true;
             break;
           }
-          // Build auth headers based on cfg.authHeader (default: bearer)
+          // Build auth headers based on registry metadata (default: bearer).
           const headers = { "Content-Type": "application/json", ...(cfg.headers || {}) };
           if (cfg.authHeader === "x-api-key") headers["X-API-Key"] = apiKey;
           else headers["Authorization"] = `Bearer ${apiKey}`;
-          // Try /models first (fast GET), fallback to chat probe on ambiguous response
-          const modelsUrl = cfg.baseUrl.replace(/\/chat\/completions$/, "/models").replace(/\/chatbot$/, "/models");
+          // Prefer an explicit registry validation URL; derive the common path otherwise.
+          const modelsUrl = cfg.validateUrl || cfg.baseUrl.replace(/\/chat\/completions$/, "/models").replace(/\/chatbot$/, "/models");
           let probeOk = null;
           try {
             const probeRes = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(8000) });

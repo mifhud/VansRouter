@@ -166,6 +166,7 @@ export default function ProviderDetailPage() {
   const apiKeyConnectionLabel =
     providerId === "xai" ? "xAI API Key"
     : providerId === "kimi" ? "Kimi API Key"
+    : providerId === "qoder" ? "PAT"
     : "API Key";
   // Resolve suffix "(level)" for a model when a thinking level is picked and the model supports it.
   const resolveThinkingSuffix = (modelId) => {
@@ -456,6 +457,8 @@ export default function ProviderDetailPage() {
   };
 
   useEffect(() => {
+    // Intentional initial synchronization with provider APIs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchConnections();
     fetchAliases();
     fetchCustomModels();
@@ -467,6 +470,8 @@ export default function ProviderDetailPage() {
   // registry remains the fallback while the request is pending or unavailable.
   useEffect(() => {
     if (providerId !== "cursor") {
+      // Intentional reset when leaving the Cursor provider.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLiveModels([]);
       return;
     }
@@ -919,6 +924,8 @@ export default function ProviderDetailPage() {
   };
 
   useEffect(() => {
+    // Intentional reconciliation with the current connection list.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedConnectionIds((prev) => prev.filter((id) => connections.some((conn) => conn.id === id)));
   }, [connections]);
 
@@ -1043,18 +1050,33 @@ export default function ProviderDetailPage() {
                   onToggle: (on) => handleAutoPingConnection(conn.id, on),
                   provider: providerId,
                 } : null}
-                onUpdateProxy={async (proxyPoolId) => {
+                onUpdateProxy={async (proxySelection) => {
                   try {
+                    const body = typeof proxySelection === "object"
+                      ? proxySelection
+                      : { proxyPoolId: proxySelection || null };
                     const res = await fetch(`/api/providers/${conn.id}`, {
                       method: "PUT",
                       headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ proxyPoolId: proxyPoolId || null }),
+                      body: JSON.stringify(body),
                     });
                     if (res.ok) {
+                      const nextProviderSpecificData = { ...conn.providerSpecificData };
+                      if (body.proxyPoolIds) {
+                        nextProviderSpecificData.proxyPoolIds = body.proxyPoolIds;
+                        nextProviderSpecificData.proxyRotationStrategy = body.proxyRotationStrategy;
+                        delete nextProviderSpecificData.proxyPoolId;
+                      } else if (body.proxyPoolId) {
+                        nextProviderSpecificData.proxyPoolId = body.proxyPoolId;
+                        delete nextProviderSpecificData.proxyPoolIds;
+                        delete nextProviderSpecificData.proxyRotationStrategy;
+                      } else {
+                        delete nextProviderSpecificData.proxyPoolId;
+                        delete nextProviderSpecificData.proxyPoolIds;
+                        delete nextProviderSpecificData.proxyRotationStrategy;
+                      }
                       setConnections(prev => prev.map(c =>
-                        c.id === conn.id
-                          ? { ...c, providerSpecificData: { ...c.providerSpecificData, proxyPoolId: proxyPoolId || null } }
-                          : c
+                        c.id === conn.id ? { ...c, providerSpecificData: nextProviderSpecificData } : c
                       ));
                     }
                   } catch (error) {

@@ -12,6 +12,14 @@ import { decloakToolNames } from "../../utils/claudeCloaking.js";
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
 
+export function responsesUsageToOpenAI(usage = {}) {
+  return {
+    prompt_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
+    completion_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
+    total_tokens: usage.total_tokens ?? ((usage.input_tokens ?? usage.prompt_tokens ?? 0) + (usage.output_tokens ?? usage.completion_tokens ?? 0)),
+  };
+}
+
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
   const byType = item.content.find((c) => c.type === "output_text");
@@ -76,10 +84,42 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel, validToolNames =
   for (const chunk of chunks) {
     const choice = chunk?.choices?.[0];
     const delta = choice?.delta || {};
+
+    // OpenAI format: content in delta + usage at chunk root
     if (typeof delta.content === "string" && delta.content.length > 0) contentParts.push(delta.content);
     if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) reasoningParts.push(delta.reasoning_content);
     if (choice?.finish_reason) finishReason = choice.finish_reason;
     if (chunk?.usage && typeof chunk.usage === "object") usage = chunk.usage;
+
+    // Gemini / Antigravity format: content in response.candidates[*].content.parts
+    // and usageMetadata inside response envelope
+    //    data: {"response":{"candidates":[{...}],"usageMetadata":{"promptTokenCount":...,...}}}
+    if (!choice && chunk.response) {
+      const resp = chunk.response;
+      const candidate = resp.candidates?.[0];
+      if (candidate) {
+        const parts = candidate.content?.parts || [];
+        for (const part of parts) {
+          if (part.text !== undefined && part.text) contentParts.push(part.text);
+          if (part.thought && part.text) reasoningParts.push(part.text);
+        }
+        if (candidate.finishReason) finishReason = candidate.finishReason.toLowerCase();
+      }
+      // Extract usage from Gemini AG envelope
+      const usageMeta = resp.usageMetadata || chunk.usageMetadata;
+      if (usageMeta && !usage) {
+        const prompt = usageMeta.promptTokenCount || 0;
+        const completion = usageMeta.candidatesTokenCount || 0;
+        usage = {
+          prompt_tokens: prompt,
+          completion_tokens: completion,
+          total_tokens: usageMeta.totalTokenCount || (prompt + completion),
+          completion_tokens_details: {
+            reasoning_tokens: usageMeta.thoughtsTokenCount || 0
+          }
+        };
+      }
+    }
 
     // Accumulate tool_calls from streaming deltas
     if (Array.isArray(delta.tool_calls)) {
@@ -146,8 +186,9 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, pr
       if (onRequestSuccess) await onRequestSuccess();
 
       const usage = jsonResponse.usage || {};
-      appendLog({ tokens: usage, status: "200 OK" });
-      saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, comboName });
+      const normalizedUsage = responsesUsageToOpenAI(usage);
+      appendLog({ tokens: normalizedUsage, status: "200 OK" });
+      saveUsageStats({ provider, model, tokens: normalizedUsage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, comboName });
 
       const { msgItem, textContent } = pickAssistantMessageForChatCompletion(jsonResponse.output);
       const totalLatency = Date.now() - requestStartTime;
@@ -155,7 +196,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, pr
       saveRequestDetail(buildRequestDetail({
         ...ctx,
         latency: { ttft: totalLatency, total: totalLatency },
-        tokens: { prompt_tokens: usage.input_tokens || 0, completion_tokens: usage.output_tokens || 0 },
+        tokens: normalizedUsage,
         response: { content: textContent, thinking: null, finish_reason: jsonResponse.status || "unknown" },
         status: "success"
       }, { endpoint: clientRawRequest?.endpoint || null })).catch(() => {});
@@ -166,8 +207,8 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, pr
       }
 
       // Build client-format response
-      const inTokens = usage.input_tokens || 0;
-      const outTokens = usage.output_tokens || 0;
+      const inTokens = normalizedUsage.prompt_tokens;
+      const outTokens = normalizedUsage.completion_tokens;
       let finalResp;
 
       // Extract tool calls from Responses API output (function_call items)

@@ -213,7 +213,6 @@ export function startCodexProxy(appPort) {
           // Lazy import to avoid circular deps
           const { exchangeTokens } = await import("../providers.js");
           const { createProviderConnection } = await import("@/models");
-
           const tokenData = await exchangeTokens(
             "codex",
             code,
@@ -221,13 +220,14 @@ export function startCodexProxy(appPort) {
             session.codeVerifier,
             state
           );
+          const expiresAt = tokenData.expiresIn
+            ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
+            : null;
           const connection = await createProviderConnection({
             provider: "codex",
             authType: "oauth",
             ...tokenData,
-            expiresAt: tokenData.expiresIn
-              ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
-              : null,
+            expiresAt,
             testStatus: "active",
           });
 

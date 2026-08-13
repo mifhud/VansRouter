@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useReducer } from "react";
+import { useState, useEffect, useRef } from "react";
+import useCliToolLifecycle from "./useCliToolLifecycle";
 import { Card, Button, ModelSelectModal, ManualConfigModal, Tooltip } from "@/shared/components";
 import Image from "next/image";
 import BaseUrlSelect from "./BaseUrlSelect";
@@ -160,30 +161,22 @@ export default function ClaudeToolCard({
   tailscaleEnabled,
   tailscaleUrl,
 }) {
-  const [state, dispatch] = useReducer((s, a) => {
-    switch (a.type) {
-      case "CHECK_START": return { ...s, checking: true };
-      case "CHECK_DONE": return { ...s, status: a.data, checking: false };
-      case "APPLY_START": return { ...s, applying: true, message: null };
-      case "APPLY_DONE": return { ...s, applying: false, message: a.message };
-      case "RESTORE_START": return { ...s, restoring: true, message: null };
-      case "RESTORE_DONE": return { ...s, restoring: false, message: a.message };
-      default: return s;
-    }
-  }, { status: initialStatus || null, checking: false, applying: false, restoring: false, message: null });
-  const claudeStatus = state.status;
-  const checkingClaude = state.checking;
-  const { applying, restoring, message } = state;
+  const {
+    status: claudeStatus, checking: checkingClaude, applying, restoring, message, dispatch,
+    customBaseUrl, getDisplayUrl, getEffectiveBaseUrl, handleToggle, modelAliases,
+    selectedApiKey, setCustomBaseUrl, setSelectedApiKey,
+  } = useCliToolLifecycle({
+    apiKeys, baseUrl, cloudEnabled, initialStatus, isExpanded, onToggle,
+    statusEndpoint: "/api/cli-tools/claude-settings",
+    getInitialApiKey: (status, keys) => {
+      const token = status?.settings?.env?.ANTHROPIC_AUTH_TOKEN;
+      return token && keys?.some((key) => key.key === token) ? token : keys?.[0]?.key || "";
+    },
+  });
   const [showInstallGuide, setShowInstallGuide] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [currentEditingAlias, setCurrentEditingAlias] = useState(null);
-  const [selectedApiKeyOverride, setSelectedApiKey] = useState(null);
-  const tokenFromFile = claudeStatus?.settings?.env?.ANTHROPIC_AUTH_TOKEN;
-  const derivedApiKey = tokenFromFile && apiKeys?.some(k => k.key === tokenFromFile) ? tokenFromFile : null;
-  const selectedApiKey = selectedApiKeyOverride ?? derivedApiKey ?? (apiKeys?.length > 0 ? apiKeys[0].key : "");
-  const [modelAliases, setModelAliases] = useState({});
   const [showManualConfigModal, setShowManualConfigModal] = useState(false);
-  const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [ccFilterNaming, setCcFilterNaming] = useState(false);
   const hasInitializedModels = useRef(false);
 
@@ -196,52 +189,6 @@ export default function ClaudeToolCard({
   };
 
   const configStatus = getConfigStatus();
-
-  const fetchModelAliases = useCallback(async () => {
-    try {
-      const res = await fetch("/api/models/alias");
-      const data = await res.json();
-      if (res.ok) setModelAliases(data.aliases || {});
-    } catch (error) {
-      console.log("Error fetching model aliases:", error);
-    }
-  }, []);
-
-
-
-  const checkClaudeStatus = useCallback(async () => {
-    dispatch({ type: "CHECK_START" });
-    try {
-      const res = await fetch("/api/cli-tools/claude-settings");
-      const data = await res.json();
-      dispatch({ type: "CHECK_DONE", data });
-    } catch (error) {
-      dispatch({ type: "CHECK_DONE", data: { installed: false, error: error.message } });
-    }
-  }, []);
-
-
-
-  const statusFetchedRef = useRef(!!initialStatus);
-  const aliasesFetchedRef = useRef(false);
-
-  const initializeCard = useCallback(async () => {
-    if (!statusFetchedRef.current) {
-      statusFetchedRef.current = true;
-      await checkClaudeStatus();
-    }
-    if (!aliasesFetchedRef.current) {
-      aliasesFetchedRef.current = true;
-      await fetchModelAliases();
-    }
-  }, [checkClaudeStatus, fetchModelAliases]);
-
-  const handleToggle = useCallback(() => {
-    if (!isExpanded) initializeCard();
-    onToggle();
-  }, [isExpanded, initializeCard, onToggle]);
-
-  useEffect(() => { initializeCard(); }, [initializeCard]);
 
   useEffect(() => {
     fetch("/api/settings").then(r => r.json()).then(data => {
@@ -274,16 +221,6 @@ export default function ClaudeToolCard({
       });
     }
   }, [claudeStatus, tool.defaultModels, onModelMappingChange]);
-  const getEffectiveBaseUrl = () => {
-    const url = customBaseUrl || baseUrl;
-    return url.endsWith("/v1") ? url : `${url}/v1`;
-  };
-
-  const getDisplayUrl = () => {
-    const url = customBaseUrl || baseUrl;
-    return url.endsWith("/v1") ? url : `${url}/v1`;
-  };
-
   const handleApplySettings = async () => {
     dispatch({ type: "APPLY_START" });
     try {

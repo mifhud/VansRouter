@@ -5,6 +5,7 @@ import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, AG_DEFAULT_TOOLS, AG_TOOL_SUFFIX 
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { scrubProxyAndFingerprintHeaders } from "../services/antigravityHeaderScrub.js";
 import { cleanJSONSchemaForAntigravity } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
 
@@ -138,15 +139,19 @@ export class AntigravityExecutor extends BaseExecutor {
   // sessionId comes from transformRequest output; base.execute runs transformRequest before
   // buildHeaders, so we read it from instance state cached there (fallback: explicit arg).
   buildHeaders(credentials, stream = true, sessionId = null) {
-    return {
+    return scrubProxyAndFingerprintHeaders({
       "Content-Type": "application/json",
       "Authorization": `Bearer ${credentials.accessToken}`,
       "User-Agent": this.config.headers?.["User-Agent"] || ANTIGRAVITY_HEADERS["User-Agent"],
-    };
+    });
   }
 
   transformRequest(model, body, stream, credentials) {
     const projectId = credentials?.projectId || this.generateProjectId();
+
+    // OpenAI clients may include stream_options even for non-streaming calls.
+    // Google generateContent rejects that combination before processing the request.
+    if (stream !== true) delete body.stream_options;
 
     // ─── Image generation: completely different request structure ───
     if (isImageModel(model)) {
@@ -245,6 +250,9 @@ export class AntigravityExecutor extends BaseExecutor {
               ? cleanJSONSchemaForAntigravity(structuredClone(fn.parameters))
               : { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] }
           });
+          // Strip parametersJsonSchema — v1internal uses parameters only;
+          // both fields cause 400 "must not be set when parameters is set".
+          delete allDeclarations[allDeclarations.length - 1].parametersJsonSchema;
         }
       }
       tools = allDeclarations.length > 0 ? [{ functionDeclarations: allDeclarations }] : [];

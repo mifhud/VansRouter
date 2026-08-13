@@ -26,13 +26,16 @@ import { dedupeTools } from "../utils/toolDeduper.js";
 import { detectLoop } from "../utils/loopGuard.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
+import { injectSystemPrompt } from "../rtk/systemInject.js";
 import { injectTerminationPrompt, injectToolProtocolPrompt } from "../rtk/terminationPrompt.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
+import { markPoolUnfit } from "../services/proxyPoolFitness.js";
 
+const MAX_POOL_RETRIES = 2;
 const TOOL_PROTOCOL_PROMPT_PROVIDERS = new Set(["kimchi", "nvidia"]);
 
 export function needsTerminationPrompt(provider, model) {
@@ -101,7 +104,7 @@ export function applyLoopGuard(translatedBody, finalFormat, provider, model, log
  * @param {object} options.credentials - Provider credentials
  * @param {string} options.sourceFormatOverride - Override detected source format (e.g. "openai-responses")
  */
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, apiKeyName = null, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled = false, pxpipeMinChars = 1000, pxpipeTimeoutMs = 10000, pxpipeTransform = "png", onPxpipeEvent = null, sourceFormatOverride, providerThinking, clientSignal, loopGuardEnabled = true }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, apiKeyInfo = null, apiKeyName = null, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled = false, pxpipeMinChars = 1000, pxpipeTimeoutMs = 10000, pxpipeTransform = "png", onPxpipeEvent = null, sourceFormatOverride, providerThinking, clientSignal, loopGuardEnabled = true, systemPrompt = null, clientModelId = null, resolveProxyConfig = null }) {
   const { provider, model, accountCount = 0 } = modelInfo;
   const requestStartTime = Date.now();
 
@@ -281,6 +284,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   } else if (tokenSaverEnabled && headroomEnabled) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
 
+  // Default system prompt from settings: inject only when the request does
+  // not already carry a system message. Token-saver prompts (caveman/ponytail)
+  // below APPEND to it into the same system slot, preserving the default.
+  if (systemPrompt) {
+    injectSystemPrompt(translatedBody, finalFormat, systemPrompt);
+    log?.debug?.("SYSPROMPT", `default injected | ${finalFormat}`);
+  }
+
   // Caveman: inject terse-style system prompt
   if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
     injectCaveman(translatedBody, finalFormat, cavemanLevel);
@@ -373,16 +384,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
 
-  const proxyOptions = {
-    connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
-    connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
-    connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
-    vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
-  };
+  const buildProxyOptions = (psd = {}) => ({
+    connectionProxyEnabled: psd?.connectionProxyEnabled === true,
+    connectionProxyUrl: psd?.connectionProxyUrl || "",
+    connectionNoProxy: psd?.connectionNoProxy || "",
+    vercelRelayUrl: psd?.vercelRelayUrl || "",
+    strictProxy: psd?.strictProxy === true || provider === "freebuff",
+    proxyPoolId: psd?.proxyPoolId || psd?.connectionProxyPoolId || null,
+  });
+  let proxyOptions = buildProxyOptions(credentials?.providerSpecificData || {});
 
   if (proxyOptions.vercelRelayUrl) {
     const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
-    const poolId = credentials?.providerSpecificData?.connectionProxyPoolId || "none";
+    const poolId = proxyOptions.proxyPoolId || "none";
     log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | pool=${poolId} | vercel-relay=${proxyOptions.vercelRelayUrl}`);
   } else if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionProxyUrl) {
     let maskedProxyUrl = proxyOptions.connectionProxyUrl;
@@ -406,13 +420,57 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${proxyOptions.connectionNoProxy}`);
   }
 
+  const proxyScope = `${provider}::${model}`;
+  let parsedNonOk = null;
+  const executeWithPoolFallback = async (attempt = 0) => {
+    let result;
+    try {
+      result = await executor.execute({ model, body: translatedBody, stream: upstreamStream, credentials, signal: streamController.signal, log, proxyOptions, accountCount });
+    } catch (error) {
+      if (error?.poolScoped && typeof resolveProxyConfig === "function" && attempt < MAX_POOL_RETRIES) {
+        const failedPool = error.poolScoped.poolId || proxyOptions.proxyPoolId;
+        await markPoolUnfit(failedPool, error.poolScoped.scope || proxyScope, error.resetsAtMs, error.poolScoped.reason || "pool-scoped");
+        try {
+          const resolved = await resolveProxyConfig(credentials, [failedPool]);
+          if (resolved?.proxyPoolId) {
+            credentials.providerSpecificData = { ...(credentials.providerSpecificData || {}), ...resolved };
+            proxyOptions = buildProxyOptions(credentials.providerSpecificData);
+            return executeWithPoolFallback(attempt + 1);
+          }
+        } catch (resolveError) {
+          log?.warn?.("PROXY", `${provider.toUpperCase()} | pool re-resolve failed: ${resolveError.message}`);
+        }
+      }
+      throw error;
+    }
+    if (!result.response.ok) {
+      const parsed = await parseUpstreamError(result.response, executor);
+      if (parsed.poolScoped && typeof resolveProxyConfig === "function" && attempt < MAX_POOL_RETRIES) {
+        const failedPool = parsed.poolScoped.poolId || proxyOptions.proxyPoolId;
+        await markPoolUnfit(failedPool, parsed.poolScoped.scope || proxyScope, parsed.resetsAtMs, parsed.poolScoped.reason || "pool-scoped");
+        try {
+          const resolved = await resolveProxyConfig(credentials, [failedPool]);
+          if (resolved?.proxyPoolId) {
+            credentials.providerSpecificData = { ...(credentials.providerSpecificData || {}), ...resolved };
+            proxyOptions = buildProxyOptions(credentials.providerSpecificData);
+            return executeWithPoolFallback(attempt + 1);
+          }
+        } catch (resolveError) {
+          log?.warn?.("PROXY", `${provider.toUpperCase()} | pool re-resolve failed: ${resolveError.message}`);
+        }
+      }
+      parsedNonOk = parsed;
+    }
+    return result;
+  };
+
   // Execute request
   let providerResponse, providerUrl, providerHeaders, finalBody;
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
   try {
-    const result = await executor.execute({ model, body: translatedBody, stream: upstreamStream, credentials, signal: streamController.signal, log, proxyOptions, accountCount });
+    const result = await executeWithPoolFallback();
     providerResponse = result.response;
     providerUrl = result.url;
     providerHeaders = result.headers;
@@ -439,13 +497,24 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     console.log(`${COLORS.red}[ERROR] ${errMsg}${COLORS.reset}`);
-    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
+    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg, error?.resetsAtMs || undefined);
   }
 
   // Handle 401/403 - try token refresh (skip for noAuth providers)
   if (!executor.noAuth && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
     try {
-      const newCredentials = await refreshWithRetry(() => executor.refreshCredentials(credentials, log), 3, log);
+      // Mutate credentials after each successful refresh: rotating refresh_token
+      // providers (xAI/grok-cli) issue a new RT on every refresh; without this,
+      // refreshWithRetry's 2nd/3rd attempt reuses the already-consumed RT →
+      // invalid_grant → auth_failed retryable=false.
+      const newCredentials = await refreshWithRetry(async () => {
+        const result = await executor.refreshCredentials(credentials, log);
+        if (result?.refreshToken && result.refreshToken !== credentials.refreshToken) {
+          if (result.accessToken) credentials.accessToken = result.accessToken;
+          credentials.refreshToken = result.refreshToken;
+        }
+        return result;
+      }, 3, log);
       if (newCredentials?.accessToken || newCredentials?.copilotToken) {
         log?.info?.("TOKEN", `${provider.toUpperCase()} | refreshed`);
         Object.assign(credentials, newCredentials);
@@ -471,7 +540,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Provider returned error
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
-    const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
+    const { statusCode, message, resetsAtMs } = parsedNonOk || await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId, apiKey, apiKeyName,
@@ -490,7 +559,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs);
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, apiKeyName, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, apiKeyInfo, apiKeyName, clientRawRequest, onRequestSuccess, clientModelId, pxpipe: pxpipeSummary };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

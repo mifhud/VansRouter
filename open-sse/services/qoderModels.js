@@ -18,10 +18,118 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { buildCosyHeaders } from "../shared/qoder/cosy.js";
 import {
   QODER_MODEL_LIST_URL,
+  QODER_CHAT_BASE_ALT,
+  QODER_JOB_TOKEN_EXCHANGE_URL,
+  QODER_USERINFO_URL,
+  QODER_IDE_VERSION,
+  QODER_CLIENT_TYPE,
 } from "../shared/qoder/constants.js";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1h, same as the Kiro catalog
+const PAT_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+const PAT_DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+const PAT_CACHE_MAX = 100;
+const PAT_PREFIX = "pt-";
+const patJobCache = new Map();
+const patJobInflight = new Map();
+
+export function isQoderPat(token) {
+  return typeof token === "string" && token.startsWith(PAT_PREFIX);
+}
+
+function prunePatJobCache(now = Date.now()) {
+  for (const [key, entry] of patJobCache) {
+    if (entry.expiresAt <= now) patJobCache.delete(key);
+  }
+  while (patJobCache.size > PAT_CACHE_MAX) {
+    patJobCache.delete(patJobCache.keys().next().value);
+  }
+}
+
+async function exchangeJobToken(pat, proxyOptions = null, signal = null) {
+  const res = await proxyAwareFetch(QODER_JOB_TOKEN_EXCHANGE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "User-Agent": "qodercli/1.0.0",
+      "Cosy-Version": QODER_IDE_VERSION,
+      "Cosy-ClientType": QODER_CLIENT_TYPE,
+    },
+    body: JSON.stringify({ personal_token: pat }),
+    signal,
+  }, proxyOptions);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`qoder PAT exchange failed: ${res.status} ${text.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  if (!data.token) throw new Error("qoder PAT exchange returned no job token");
+  let expiresAt = Date.now() + PAT_DEFAULT_TTL_MS;
+  if (data.expires_at) {
+    const parsed = Date.parse(data.expires_at);
+    if (!Number.isNaN(parsed)) expiresAt = parsed;
+  } else if (typeof data.expires_in === "number" && data.expires_in > 0) {
+    expiresAt = Date.now() + data.expires_in * 1000;
+  }
+  return { jobToken: data.token, expiresAt };
+}
+
+async function fetchUserIdForJobToken(jobToken, proxyOptions = null, signal = null) {
+  try {
+    const res = await proxyAwareFetch(QODER_USERINFO_URL, {
+      headers: { Authorization: `Bearer ${jobToken}`, Accept: "application/json", "User-Agent": "qodercli/1.0.0" },
+      signal,
+    }, proxyOptions);
+    if (!res.ok) return "";
+    const data = await res.json().catch(() => ({}));
+    return data.id || data.userId || data.user_id || "";
+  } catch {
+    return "";
+  }
+}
+
+async function resolvePatCredential(pat, proxyOptions = null, signal = null) {
+  const cacheKey = createHash("sha256").update(pat).digest("hex");
+  prunePatJobCache();
+  const cached = patJobCache.get(cacheKey);
+  if (cached && cached.expiresAt - Date.now() > PAT_REFRESH_BUFFER_MS) return cached;
+
+  const existing = patJobInflight.get(cacheKey);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    const { jobToken, expiresAt } = await exchangeJobToken(pat, proxyOptions, signal);
+    const entry = { accessToken: jobToken, userId: await fetchUserIdForJobToken(jobToken, proxyOptions, signal), expiresAt };
+    patJobCache.set(cacheKey, entry);
+    prunePatJobCache();
+    return entry;
+  })();
+  patJobInflight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    if (patJobInflight.get(cacheKey) === promise) patJobInflight.delete(cacheKey);
+  }
+}
+
+export async function resolveQoderCredentials(credentials, proxyOptions = null, signal = null) {
+  const raw = credentials?.apiKey || credentials?.accessToken;
+  if (!isQoderPat(raw)) return credentials;
+  const resolved = await resolvePatCredential(raw, proxyOptions, signal);
+  return {
+    ...credentials,
+    accessToken: resolved.accessToken,
+    apiKey: undefined,
+    providerSpecificData: {
+      authMethod: "pat",
+      ...(credentials?.providerSpecificData || {}),
+      userId: resolved.userId || credentials?.providerSpecificData?.userId || "",
+      machineId: credentials?.providerSpecificData?.machineId || "",
+    },
+  };
+}
 
 /** @type {Map<string, { expiresAt: number, models: any[], rawConfigs: Map<string, object>, fetched: boolean }>} */
 const catalogCache = new Map();
@@ -66,12 +174,15 @@ function cosyCredsFromConnection(credentials) {
  */
 async function fetchQoderCatalogRaw(credentials, signal, proxyOptions = null) {
   const creds = cosyCredsFromConnection(credentials);
+  const modelListUrl = creds.authToken.startsWith("jt-")
+    ? `${QODER_CHAT_BASE_ALT}/algo/api/v2/model/list`
+    : QODER_MODEL_LIST_URL;
   if (!creds.userId || !creds.authToken) return null;
 
   const headers = {
     Accept: "application/json",
     "Accept-Encoding": "identity",
-    ...buildCosyHeaders(Buffer.alloc(0), QODER_MODEL_LIST_URL, creds),
+    ...buildCosyHeaders(Buffer.alloc(0), modelListUrl, creds),
   };
 
   const controller = new AbortController();
@@ -92,7 +203,7 @@ async function fetchQoderCatalogRaw(credentials, signal, proxyOptions = null) {
       }
     }
     response = await proxyAwareFetch(
-      QODER_MODEL_LIST_URL,
+      modelListUrl,
       {
         method: "GET",
         headers,
@@ -159,10 +270,18 @@ export async function getQoderModelConfig(credentials, modelKey, options = {}) {
  * one upstream request per credential.
  */
 export async function resolveQoderModels(credentials, options = {}) {
-  if (!credentials?.accessToken) return null;
-  const psd = credentials.providerSpecificData || {};
+  let resolvedCredentials = credentials;
+  try {
+    resolvedCredentials = await resolveQoderCredentials(credentials, options.proxyOptions, options.signal);
+  } catch (error) {
+    options.log?.warn?.("QODER", `PAT exchange failed: ${error.message}`);
+    return null;
+  }
+  if (!resolvedCredentials?.accessToken) return null;
+  const psd = resolvedCredentials.providerSpecificData || {};
   if (!psd.userId) return null;
 
+  credentials = resolvedCredentials;
   const key = cacheKey(credentials);
   const now = Date.now();
   if (!options.forceRefresh) {

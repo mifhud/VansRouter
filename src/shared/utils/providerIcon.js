@@ -25,10 +25,26 @@ export function resolveProviderIconId(providerId) {
   return aliased;
 }
 
-/** `/providers/{id}.webp` or null when previously failed. */
+const PNG_PROVIDERS = new Set([
+  "devin-cli",
+  "vercel",
+  "venice",
+  "perplexity-agent",
+  "morph",
+  "novita",
+  "agentrouter",
+  "grok-cli",
+  "clinepass",
+  "freebuff",
+  "mmf"
+]);
+
+/** `/providers/{id}.webp` (or .png) or null when previously failed. */
 export function getProviderIconSrc(providerId) {
   const id = resolveProviderIconId(providerId);
-  return id ? `/providers/${id}.webp` : null;
+  if (!id) return null;
+  const ext = PNG_PROVIDERS.has(id) ? "png" : "webp";
+  return `/providers/${id}.${ext}`;
 }
 
 /** Call from img onError so later mounts skip the request. */

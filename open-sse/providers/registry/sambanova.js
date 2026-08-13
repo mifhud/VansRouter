@@ -2,6 +2,9 @@ export default {
   id: "sambanova",
   priority: 50,
   alias: "samba",
+  aliases: ["sambanova-ai"],
+  uiAlias: "samba",
+  authModes: ["apikey"],
   display: {
     name: "SambaNova",
     icon: "memory",

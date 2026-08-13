@@ -75,6 +75,8 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
 
   useEffect(() => {
     if (!isOpen || !connection || !isGoogle) {
+      // Intentional reset when the external connection context changes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setGcpProjects(null);
       setProjectsError("");
       return;

@@ -20,7 +20,7 @@ async function setupRoute() {
   }));
   // SSRF guard treats local/private URLs as allowed for tests
   vi.doMock("@/shared/utils/ssrfGuard.js", () => ({
-    assertPublicUrl: () => true,
+    assertPublicUrl: async () => true,
   }));
   vi.doMock("@/dashboardGuard", () => ({
     isLocalRequest: () => false,

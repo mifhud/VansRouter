@@ -40,6 +40,7 @@ export function TtsExampleCard({ providerId }) {
 
   // Form state
   const [input, setInput]               = useState("Hello, this is a text to speech test.");
+  const [style, setStyle]               = useState("");
   const [apiKey, setApiKey]             = useState("");
   const [useTunnel, setUseTunnel]       = useState(false);
   const [localEndpoint, setLocalEndpoint]   = useState("");
@@ -189,13 +190,14 @@ export function TtsExampleCard({ providerId }) {
   const ttsBody = (() => {
     const b = { model: modelFull, input };
     if (config.hasLanguageHint && languageHint) b.language = languageHint;
+    if (config.hasStyleInput && style.trim()) b.style = style.trim().slice(0, 1000);
     return b;
   })();
   const curlSnippet = `curl -X POST ${endpoint}/v1/audio/speech${responseFormat === "json" ? "?response_format=json" : ""} \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey || "YOUR_KEY"}" \\
   -d '${JSON.stringify(ttsBody)}' \\
-  ${responseFormat === "json" ? "" : "--output speech.mp3"}`;
+  ${responseFormat === "json" ? "" : `--output speech.${providerId === "xiaomi-mimo" ? "wav" : "mp3"}`}`;
 
   const handleRun = async () => {
     if (!input.trim() || !modelFull) return;
@@ -223,7 +225,8 @@ export function TtsExampleCard({ providerId }) {
       if (responseFormat === "json") {
         const data = await res.json();
         setJsonResponse(data); // Store full JSON response
-        const audioBlob = await fetch(`data:audio/mp3;base64,${data.audio}`).then(r => r.blob());
+        const format = data.format || "mp3";
+        const audioBlob = await fetch(`data:audio/${format};base64,${data.audio}`).then(r => r.blob());
         setAudioUrl(URL.createObjectURL(audioBlob));
       } else {
         const blob = await res.blob();
@@ -423,6 +426,19 @@ export function TtsExampleCard({ providerId }) {
             </div>
           </Row>
 
+          {config.hasStyleInput && (
+            <Row label="Style">
+              <textarea
+                value={style}
+                onChange={(e) => setStyle(e.target.value)}
+                maxLength={1000}
+                placeholder="e.g. a warm, gentle voice, speaking slowly"
+                rows={2}
+                className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary resize-none"
+              />
+            </Row>
+          )}
+
           {/* Output Format */}
           <Row label="Output Format">
             <select
@@ -471,7 +487,7 @@ export function TtsExampleCard({ providerId }) {
                 <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
                   Response {latency && <span className="font-normal normal-case">&#9889; {latency}ms</span>}
                 </span>
-                <a href={audioUrl} download="speech.mp3" className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors">
+                <a href={audioUrl} download={`speech.${jsonResponse?.format || responseFormat}`} className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors">
                   <span className="material-symbols-outlined text-[14px]">download</span>
                   Download
                 </a>

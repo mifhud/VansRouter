@@ -87,6 +87,8 @@ export default function PxpipeClient() {
   }, []);
 
   useEffect(() => {
+    // Intentional initial synchronization with the PXPIPE service.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, [refresh]);
 

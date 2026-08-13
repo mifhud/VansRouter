@@ -12,6 +12,17 @@ const execAsync = promisify(exec);
 const getConfigDir = () => path.join(os.homedir(), ".config", "opencode");
 const getConfigPath = () => path.join(getConfigDir(), "opencode.json");
 
+const writeConfig = async (configPath, config) => {
+  const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(config, null, 2));
+    await fs.rename(tempPath, configPath);
+  } catch (error) {
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+};
+
 // Check if opencode CLI is installed (via which/where or config file exists)
 const checkOpenCodeInstalled = async () => {
   try {
@@ -48,10 +59,15 @@ const readConfig = async () => {
   }
 };
 
-const has9RouterConfig = (config) => {
-  if (!config?.provider) return false;
-  return !!config.provider["9router"];
+const getRouterProviderKey = (config) =>
+  config?.provider?.VansRoute ? "VansRoute" : config?.provider?.["9router"] ? "9router" : null;
+
+const getRouterProvider = (config) => {
+  const key = getRouterProviderKey(config);
+  return key ? config.provider[key] : null;
 };
+
+const has9RouterConfig = (config) => !!getRouterProvider(config);
 
 // GET - Check opencode CLI and read current settings
 export async function GET() {
@@ -67,17 +83,22 @@ export async function GET() {
     }
 
     const config = await readConfig();
-    const providerConfig = config?.provider?.["9router"];
+    const providerConfig = getRouterProvider(config);
     const modelMap = providerConfig?.models || {};
 
     return NextResponse.json({
       installed: true,
       config,
+      hasVansRoute: has9RouterConfig(config),
       has9Router: has9RouterConfig(config),
       configPath: getConfigPath(),
         opencode: {
           models: Object.keys(modelMap),
-          activeModel: config?.model?.startsWith("9router/") ? config.model.replace(/^9router\//, "") : null,
+          activeModel: config?.model?.startsWith("VansRoute/")
+            ? config.model.replace(/^VansRoute\//, "")
+            : config?.model?.startsWith("9router/")
+              ? config.model.replace(/^9router\//, "")
+              : null,
           baseURL: providerConfig?.options?.baseURL || null,
         },
     });
@@ -91,11 +112,20 @@ export async function POST(request) {
   try {
     const { baseUrl, apiKey, model, models, activeModel, subagentModel } = await request.json();
 
-    // Accept either `model` (string, legacy) or `models` (array of strings)
-    const modelsArray = Array.isArray(models) ? models.slice() : (typeof model === "string" ? [model] : []);
+    // Accept either `model` (string, legacy) or `models` (array of strings).
+    const modelsArray = (Array.isArray(models) ? models : (typeof model === "string" ? [model] : []))
+      .filter((value) => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean);
 
-    if (!baseUrl || modelsArray.length === 0) {
-      return NextResponse.json({ error: "baseUrl and at least one model are required" }, { status: 400 });
+    let parsedBaseUrl;
+    try {
+      parsedBaseUrl = new URL(baseUrl);
+    } catch {
+      return NextResponse.json({ error: "baseUrl must be a valid URL" }, { status: 400 });
+    }
+    if (!/^https?:$/.test(parsedBaseUrl.protocol) || modelsArray.length === 0) {
+      return NextResponse.json({ error: "baseUrl must use HTTP(S) and include at least one model" }, { status: 400 });
     }
 
     const configDir = getConfigDir();
@@ -114,7 +144,7 @@ export async function POST(request) {
     if (!config.provider) config.provider = {};
 
     // Preserve any existing 9router provider entry and its models
-    const existingProvider = config.provider["9router"] || { npm: "@ai-sdk/openai-compatible", options: {}, models: {} };
+    const existingProvider = config.provider.VansRoute || config.provider["9router"] || { npm: "@ai-sdk/openai-compatible", options: {}, models: {} };
 
     // Merge options (overwrite baseURL/apiKey)
     existingProvider.options = {
@@ -132,8 +162,9 @@ export async function POST(request) {
       existingProvider.models[m] = { name: m, modalities: { input: ["text", "image"], output: ["text"] } };
     }
 
-    // Save merged provider back
-    config.provider["9router"] = existingProvider;
+    // Save the canonical provider and remove the legacy duplicate after migration.
+    config.provider.VansRoute = existingProvider;
+    delete config.provider["9router"];
 
     // Set the active model: prefer explicit activeModel, else first of modelsArray
     // If activeModel is explicitly empty string, clear the model
@@ -142,7 +173,7 @@ export async function POST(request) {
     } else {
       const finalActive = activeModel || modelsArray[0];
       if (finalActive) {
-        config.model = `9router/${finalActive}`;
+        config.model = `VansRoute/${finalActive}`;
       }
     }
 
@@ -151,10 +182,10 @@ export async function POST(request) {
     config.agent.explorer = {
       description: "Fast explorer subagent for codebase exploration",
       mode: "subagent",
-      model: `9router/${effectiveSubagentModel}`,
+      model: `VansRoute/${effectiveSubagentModel}`,
     };
 
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+    await writeConfig(configPath, config);
 
     return NextResponse.json({
       success: true,
@@ -170,6 +201,9 @@ export async function POST(request) {
 export async function PATCH(request) {
   try {
     const { clearActiveModel } = await request.json();
+    if (clearActiveModel !== true) {
+      return NextResponse.json({ error: "clearActiveModel must be true" }, { status: 400 });
+    }
     const configPath = getConfigPath();
 
     const config = await readConfig();
@@ -178,13 +212,13 @@ export async function PATCH(request) {
     }
 
     if (clearActiveModel === true) {
-      // Clear active model but keep models in the list
-      if (config.model?.startsWith("9router/")) {
+      // Clear active model but keep models in the list.
+      if (config.model?.startsWith("9router/") || config.model?.startsWith("VansRoute/")) {
         config.model = "";
       }
     }
 
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+    await writeConfig(configPath, config);
 
     return NextResponse.json({
       success: true,
@@ -207,33 +241,36 @@ export async function DELETE(request) {
       return NextResponse.json({ success: true, message: "No config file to reset" });
     }
 
-    // If specific model provided, remove just that model
-    if (modelToRemove && config.provider?.["9router"]?.models) {
-      delete config.provider["9router"].models[modelToRemove];
-      
-      // If no models left, remove the provider
-      if (Object.keys(config.provider["9router"].models).length === 0) {
-        delete config.provider["9router"];
-        if (config.model?.startsWith("9router/")) delete config.model;
-      } else if (config.model === `9router/${modelToRemove}`) {
-        // If removed model was active, switch to first remaining model
-        const remainingModels = Object.keys(config.provider["9router"].models);
-        config.model = `9router/${remainingModels[0]}`;
+    const providerKey = getRouterProviderKey(config);
+    const provider = providerKey ? config.provider[providerKey] : null;
+    const modelPrefix = providerKey ? `${providerKey}/` : null;
+
+    // If specific model provided, remove just that model.
+    if (modelToRemove && provider?.models) {
+      delete provider.models[modelToRemove];
+
+      if (Object.keys(provider.models).length === 0) {
+        delete config.provider[providerKey];
+        if (modelPrefix && config.model?.startsWith(modelPrefix)) delete config.model;
+      } else if (config.model === `${modelPrefix}${modelToRemove}`) {
+        const remainingModels = Object.keys(provider.models);
+        config.model = `${modelPrefix}${remainingModels[0]}`;
       }
     } else {
-      // No specific model - remove entire 9router provider
-      if (config.provider) delete config.provider["9router"];
-      if (config.model?.startsWith("9router/")) delete config.model;
+      // No specific model - remove both canonical and legacy provider entries.
+      delete config.provider?.["9router"];
+      delete config.provider?.VansRoute;
+      if (config.model?.startsWith("9router/") || config.model?.startsWith("VansRoute/")) delete config.model;
     }
 
     // Remove subagent configuration
-    if (config.agent?.explorer?.model?.startsWith("9router/")) {
+    if (config.agent?.explorer?.model?.startsWith("9router/") || config.agent?.explorer?.model?.startsWith("VansRoute/")) {
       delete config.agent.explorer;
       // Clean up empty agent object
       if (Object.keys(config.agent).length === 0) delete config.agent;
     }
 
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+    await writeConfig(configPath, config);
 
     return NextResponse.json({
       success: true,

@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import { createProxyPool } from "@/models";
+import { RELAY_TARGET_GUARD_SOURCE } from "@/shared/utils/ssrfGuard.js";
+import { requireDashboardAuth } from "@/lib/auth/routeAuth.js";
 
 const VERCEL_API = "https://api.vercel.com";
 
 // Relay function source code deployed to Vercel
 // Forwards requests to target URL specified in x-relay-target header
 const RELAY_FUNCTION_CODE = `
+${RELAY_TARGET_GUARD_SOURCE}
 export const config = { runtime: "edge" };
 
 export default async function handler(req) {
@@ -18,7 +21,13 @@ export default async function handler(req) {
     });
   }
 
-  const targetUrl = target.replace(/\\/$/, "") + relayPath;
+  let targetUrl;
+  try {
+    targetUrl = new URL(relayPath, target.replace(/\\/$/, "")).toString();
+    assertTrustedTarget(targetUrl);
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "content-type": "application/json" } });
+  }
 
   const headers = new Headers(req.headers);
   headers.delete("x-relay-target");
@@ -61,6 +70,7 @@ async function pollDeployment(deploymentId, token, maxMs = 120000) {
 
 // POST /api/proxy-pools/vercel-deploy
 export async function POST(request) {
+  if (!await requireDashboardAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const body = await request.json();
     const vercelToken = body.vercelToken;

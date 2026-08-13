@@ -82,6 +82,7 @@ export async function GET() {
     const aliasMap = {};
     for (const [id, def] of Object.entries(AI_PROVIDERS)) {
       if (def.alias && def.alias !== id) aliasMap[def.alias] = id;
+      for (const alias of def.aliases || []) aliasMap[alias] = id;
     }
 
     // Include all registered providers (not just those with connections) so

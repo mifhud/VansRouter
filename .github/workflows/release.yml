@@ -36,6 +36,7 @@ jobs:
     if: needs.check-branch.outputs.is-main == 'true'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: read
       packages: write
 
@@ -67,11 +68,24 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache,mode=max
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,scope=release,mode=max,ignore-error=true,timeout=5m
           platforms: linux/amd64,linux/arm64
           provenance: false
           sbom: false
+
+      - name: Verify multi-platform manifest
+        run: |
+          docker buildx imagetools inspect "${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}" | tee /tmp/image-manifest.txt
+          grep -q 'linux/amd64' /tmp/image-manifest.txt
+          grep -q 'linux/arm64' /tmp/image-manifest.txt
+
+      - name: Verify native SQLite in image
+        run: |
+          docker pull "${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}"
+          docker run --rm "${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}" \
+            node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); if (db.prepare('SELECT 1 AS ok').get().ok !== 1) process.exit(1); db.close(); console.log('native SQLite OK')"
 
   publish-npm:
     needs: check-branch

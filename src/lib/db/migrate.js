@@ -149,8 +149,8 @@ function importLegacyMain(adapter, data) {
 
   importWithAssertion(adapter, "combos", data.combos || [], (c) => {
     adapter.run(
-      `INSERT OR REPLACE INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)`,
-      [c.id, c.name, c.kind || null, stringifyJson(c.models || []), c.createdAt || new Date().toISOString(), c.updatedAt || new Date().toISOString()]
+      `INSERT OR REPLACE INTO combos(id, name, kind, models, context_length, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      [c.id, c.name, c.kind || null, stringifyJson(c.models || []), c.context_length ?? null, c.createdAt || new Date().toISOString(), c.updatedAt || new Date().toISOString()]
     );
   }, (c) => ({ id: c.id ?? null, name: c.name ?? null }));
 
@@ -215,7 +215,6 @@ function importLegacyDetails(adapter, data) {
 // ─── Main entry ──────────────────────────────────────────────────────────
 export async function runMigrationOnce(adapter) {
   if (_migratedAdapters.has(adapter)) return;
-  _migratedAdapters.add(adapter);
 
   // Capture freshness BEFORE migrations stamp _meta (otherwise we'd misclassify
   // a brand-new DB as non-fresh once schemaVersion is written).
@@ -276,6 +275,7 @@ export async function runMigrationOnce(adapter) {
         setMetaSync(adapter, "migratedAt", new Date().toISOString());
       });
     } catch (err) {
+      _migratedAdapters.delete(adapter);
       if (err instanceof MigrationAborted) {
         console.error(`[DB][migrate] aborted: ${err.message} | legacy JSON kept | backup: ${backupDir}`);
         return;
@@ -284,6 +284,7 @@ export async function runMigrationOnce(adapter) {
     }
 
     try { fs.writeFileSync(MIGRATED_MARKER, new Date().toISOString()); } catch {}
+    _migratedAdapters.add(adapter);
     pruneOldBackups();
     console.log(`[DB][migrate] JSON → SQLite in ${Date.now() - t0}ms | legacy JSON kept at DATA_DIR | backup: ${backupDir}`);
     return;
@@ -294,4 +295,5 @@ export async function runMigrationOnce(adapter) {
   const newVer = getAppVersion();
   const oldVer = getMetaSync(adapter, "appVersion", null);
   if (oldVer !== newVer) setMetaSync(adapter, "appVersion", newVer);
+  _migratedAdapters.add(adapter);
 }

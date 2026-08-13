@@ -54,6 +54,12 @@ $DATA_DIR/
 Host path: `$HOME/.9router/db/data.sqlite`
 Container path: `/app/data/db/data.sqlite`
 
+Production requirements:
+- Run one VansRouter process per SQLite file. Multiple containers/processes with separate local volumes do not share proxy-pool fitness state.
+- If scaling horizontally, provide a shared database/backend for routing state before enabling multiple app instances.
+- Keep the persistent volume name `vansrouter-data`; renaming it creates a new empty database volume.
+- Production requires a native SQLite driver. The `sql.js` fallback is single-process development fallback only.
+
 ## Optional env vars
 
 ```bash

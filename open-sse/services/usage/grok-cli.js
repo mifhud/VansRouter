@@ -29,10 +29,14 @@ import {
   GROK_CLI_USER_AGENT,
   GROK_CLI_VERSION,
 } from "../../config/grokCli.js";
+import { decodeGrokCreditsFrame } from "./grokCliQuotaFrame.js";
 
 const USAGE = U("grok-cli");
 const BILLING_URL = USAGE.url || "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const USER_URL = USAGE.userUrl || "https://cli-chat-proxy.grok.com/v1/user?include=subscription";
+const GRPC_CREDITS_URL =
+  "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+const GRPC_WEB_EMPTY_REQUEST_FRAME = Buffer.from([0, 0, 0, 0, 0]);
 
 /** Unwrap protobuf-json `{ val: n }` or plain numbers/strings. */
 function unwrapVal(value, fallback = 0) {
@@ -198,6 +202,18 @@ export function parseGrokCliBilling(billing, user = null) {
     };
   }
 
+  const usedPct = unwrapVal(
+    config.creditUsagePercent ?? config.credit_usage_percent ?? root.creditUsagePercent,
+    NaN,
+  );
+  if (Number.isFinite(usedPct) && usedPct >= 0) {
+    quotas["Weekly SuperGrok"] = makeQuota({
+      used: Math.max(0, Math.min(100, usedPct)),
+      total: 100,
+      resetAt: periodEnd,
+    });
+  }
+
   // Opportunistic richer credit envelopes (future / other account types)
   const creditBags = [
     root.credits,
@@ -256,6 +272,42 @@ export function parseGrokCliBilling(billing, user = null) {
   };
 }
 
+async function fetchGrokCliCreditsConfig(accessToken, proxyOptions = null) {
+  if (!accessToken) return null;
+  try {
+    const res = await proxyAwareFetch(
+      GRPC_CREDITS_URL,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/grpc-web+proto",
+          "X-Grpc-Web": "1",
+          Accept: "application/grpc-web+proto",
+        },
+        body: GRPC_WEB_EMPTY_REQUEST_FRAME,
+      },
+      proxyOptions,
+    );
+    if (!res?.ok) return null;
+    const arrayBuffer = await res.arrayBuffer().catch(() => null);
+    return arrayBuffer ? decodeGrokCreditsFrame(Buffer.from(arrayBuffer)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function quotasFromGrpcCredits(decoded) {
+  if (!decoded || !Number.isFinite(decoded.percentUsed)) return null;
+  return {
+    "Weekly SuperGrok": makeQuota({
+      used: Math.round(Math.max(0, Math.min(100, decoded.percentUsed))),
+      total: 100,
+      resetAt: decoded.resetAt || null,
+    }),
+  };
+}
+
 /**
  * @param {string} accessToken
  * @param {object|null} providerSpecificData
@@ -306,6 +358,10 @@ export async function getGrokCliUsage(accessToken, providerSpecificData = null, 
     const parsed = parseGrokCliBilling(billing, user);
 
     if (!parsed.quotas || Object.keys(parsed.quotas).length === 0) {
+      const grpcQuotas = quotasFromGrpcCredits(
+        await fetchGrokCliCreditsConfig(accessToken, proxyOptions),
+      );
+      if (grpcQuotas) return { plan: parsed.plan, quotas: grpcQuotas };
       return {
         plan: parsed.plan,
         message: parsed.subscriptionAccess

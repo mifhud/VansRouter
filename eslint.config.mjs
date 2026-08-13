@@ -1,7 +1,11 @@
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
+import reactHooks from "eslint-plugin-react-hooks";
 
 const eslintConfig = defineConfig([
+  {
+    plugins: { "react-hooks": reactHooks },
+  },
   ...nextVitals,
   // Server-side modules (API routes, open-sse engine, lib) are plain Node ESM
   // with no JSX — enable no-undef there to catch use-before-define /
@@ -62,6 +66,7 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // CLI shipped/bundled artifacts and dependencies (lint the source, not output):
     "cli/node_modules/**",
+    "cli/app/_nm/**",
     "cli/app/.next/**",
     "cli/app/.next-cli-build/**",
     "cli/app/src/mitm/server.js",

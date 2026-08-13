@@ -24,6 +24,7 @@ import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { guardedFetch } from "@/shared/utils/ssrfGuard.js";
 
 const UPSTREAM_CONNECTION_RE = /[-_][0-9a-f]{8,}$/i;
 const LLM_KIND = "llm";
@@ -168,7 +169,24 @@ export async function fetchModelsFetcherIds(providerId, providerInfo) {
     if (!response.ok) return [];
 
     const data = await response.json();
-    const rawModels = Array.isArray(data) ? data : (data?.data || data?.models || data?.results || []);
+    let rawModels;
+    if (Array.isArray(data)) {
+      rawModels = data;
+    } else if (Array.isArray(data?.data)) {
+      rawModels = data.data;
+    } else if (data?.models && typeof data.models === "object" && !Array.isArray(data.models)) {
+      rawModels = Object.values(data.models);
+    } else if (data && typeof data === "object") {
+      const providerKey = providerInfo?.id || providerId;
+      const aliasKey = providerInfo?.alias || providerInfo?.uiAlias;
+      const entry = data[providerKey] || data[aliasKey] || data[providerId];
+      const models = entry?.models;
+      rawModels = models && typeof models === "object" && !Array.isArray(models)
+        ? Object.values(models)
+        : [];
+    } else {
+      rawModels = data?.models || data?.results || [];
+    }
 
     let ids;
     if (fetcher.type === "opencode-free") {
@@ -235,7 +253,7 @@ async function fetchCompatibleModelIds(connection) {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch(url, {
+    const response = await guardedFetch(url, {
       method: "GET",
       headers,
       cache: "no-store",

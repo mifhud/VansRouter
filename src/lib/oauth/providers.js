@@ -40,10 +40,7 @@ import {
   QWEN_CONFIG,
   QODER_CONFIG,
   IFLOW_CONFIG,
-  ANTIGRAVITY_CONFIG,
   GITHUB_CONFIG,
-  KIRO_CONFIG,
-  assertValidAwsRegion,
   CURSOR_CONFIG,
   KIMI_CONFIG,
   KILOCODE_CONFIG,
@@ -52,8 +49,8 @@ import {
   GITLAB_CONFIG,
   CODEBUDDY_CONFIG,
   ZAI_CONFIG,
-  KIMCHI_CONFIG,
   GROK_CLI_CONFIG,
+  FREEBUFF_CONFIG,
   getOAuthClientMetadata,
 } from "./constants/oauth";
 import { XAI_CONFIG, XAI_PKCE_VERIFIER_BYTES } from "./constants/xai";
@@ -64,6 +61,10 @@ import {
   extractCodexAccountInfo,
   fetchKiroProfileArn,
 } from "./providerHelpers";
+import kiro from "./providers/kiro.js";
+import antigravity from "./providers/antigravity.js";
+import kimchi from "./providers/kimchi.js";
+import freebuff from "./providers/freebuff.js";
 
 export { extractCodexAccountInfo, fetchKiroProfileArn };
 
@@ -408,6 +409,8 @@ const PROVIDERS = {
     },
   },
 
+  freebuff,
+
   "gemini-cli": {
     config: GEMINI_CONFIG,
     flowType: "authorization_code",
@@ -490,124 +493,7 @@ const PROVIDERS = {
     }),
   },
 
-  antigravity: {
-    config: ANTIGRAVITY_CONFIG,
-    flowType: "authorization_code",
-    buildAuthUrl: (config, redirectUri, state) => {
-      const params = new URLSearchParams({
-        client_id: config.clientId,
-        response_type: "code",
-        redirect_uri: redirectUri,
-        scope: config.scopes.join(" "),
-        state: state,
-        access_type: "offline",
-        prompt: "consent",
-      });
-      return `${config.authorizeUrl}?${params.toString()}`;
-    },
-    exchangeToken: async (config, code, redirectUri) => {
-      const response = await fetch(config.tokenUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-        body: new URLSearchParams({
-          grant_type: "authorization_code",
-          client_id: config.clientId,
-          client_secret: config.clientSecret,
-          code: code,
-          redirect_uri: redirectUri,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Token exchange failed: ${error}`);
-      }
-
-      return await response.json();
-    },
-    postExchange: async (tokens) => {
-      // Numeric enums matching Antigravity binary ClientMetadata
-      const loadHeaders = {
-        "Authorization": `Bearer ${tokens.access_token}`,
-        "Content-Type": "application/json",
-        "User-Agent": ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent,
-        "X-Goog-Api-Client": ANTIGRAVITY_CONFIG.loadCodeAssistApiClient,
-        "Client-Metadata": ANTIGRAVITY_CONFIG.loadCodeAssistClientMetadata,
-        "x-request-source": "local",
-      };
-      const metadata = getOAuthClientMetadata();
-
-      // Fetch user info
-      const userInfoRes = await fetch(`${ANTIGRAVITY_CONFIG.userInfoUrl}?alt=json`, {
-        headers: {
-          Authorization: `Bearer ${tokens.access_token}`,
-          "x-request-source": "local",
-        },
-      });
-      const userInfo = userInfoRes.ok ? await userInfoRes.json() : {};
-
-      // Load Code Assist to get project ID and tier
-      let projectId = "";
-      let tierId = "legacy-tier";
-      try {
-        const loadRes = await fetch(ANTIGRAVITY_CONFIG.loadCodeAssistEndpoint, {
-          method: "POST",
-          headers: loadHeaders,
-          body: JSON.stringify({ metadata }),
-        });
-        if (loadRes.ok) {
-          const data = await loadRes.json();
-          projectId = data.cloudaicompanionProject?.id || data.cloudaicompanionProject || "";
-          if (Array.isArray(data.allowedTiers)) {
-            for (const tier of data.allowedTiers) {
-              if (tier.isDefault && tier.id) {
-                tierId = tier.id.trim();
-                break;
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.log("Failed to load code assist:", e);
-      }
-
-      // Fire-and-forget onboarding — does not block DB save
-      if (projectId) {
-        const doOnboard = async () => {
-          for (let i = 0; i < 10; i++) {
-            try {
-              const onboardRes = await fetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
-                method: "POST",
-                headers: loadHeaders,
-                body: JSON.stringify({ tierId, metadata }),
-              });
-              if (onboardRes.ok) {
-                const result = await onboardRes.json();
-                if (result.done === true) break;
-              }
-            } catch (e) {
-              break;
-            }
-            await new Promise(resolve => setTimeout(resolve, 5000));
-          }
-        };
-        doOnboard().catch(() => {});
-      }
-
-      return { userInfo, projectId };
-    },
-    mapTokens: (tokens, extra) => ({
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      expiresIn: tokens.expires_in,
-      scope: tokens.scope,
-      email: extra?.userInfo?.email,
-      projectId: extra?.projectId,
-    }),
-  },
+  antigravity,
 
   iflow: {
     config: IFLOW_CONFIG,
@@ -944,152 +830,7 @@ const PROVIDERS = {
     }),
   },
 
-  kiro: {
-    config: KIRO_CONFIG,
-    flowType: "device_code",
-    // Kiro uses AWS SSO OIDC - requires client registration first
-    requestDeviceCode: async (config, codeChallenge, options = {}) => {
-      const trimmedRegion = typeof options.region === "string" ? options.region.trim() : "";
-      const region = trimmedRegion || "us-east-1";
-      assertValidAwsRegion(region);
-      const trimmedStartUrl = typeof options.startUrl === "string" ? options.startUrl.trim() : "";
-      const startUrl = trimmedStartUrl || config.startUrl;
-      const authMethod = options.authMethod === "idc" ? "idc" : "builder-id";
-      const registerClientUrl = `https://oidc.${region}.amazonaws.com/client/register`;
-      const deviceAuthUrl = `https://oidc.${region}.amazonaws.com/device_authorization`;
-
-      // Step 1: Register client with AWS SSO OIDC
-      const registerRes = await fetch(registerClientUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          clientName: config.clientName,
-          clientType: config.clientType,
-          scopes: config.scopes,
-          grantTypes: config.grantTypes,
-          issuerUrl: config.issuerUrl,
-        }),
-      });
-
-      if (!registerRes.ok) {
-        const error = await registerRes.text();
-        throw new Error(`Client registration failed: ${error}`);
-      }
-
-      const clientInfo = await registerRes.json();
-
-      // Step 2: Request device authorization
-      const deviceRes = await fetch(deviceAuthUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          clientId: clientInfo.clientId,
-          clientSecret: clientInfo.clientSecret,
-          startUrl,
-        }),
-      });
-
-      if (!deviceRes.ok) {
-        const error = await deviceRes.text();
-        throw new Error(`Device authorization failed: ${error}`);
-      }
-
-      const deviceData = await deviceRes.json();
-
-      // Return combined data for polling
-      return {
-        device_code: deviceData.deviceCode,
-        user_code: deviceData.userCode,
-        verification_uri: deviceData.verificationUri,
-        verification_uri_complete: deviceData.verificationUriComplete,
-        expires_in: deviceData.expiresIn,
-        interval: deviceData.interval || 5,
-        // Store client credentials for token exchange
-        _clientId: clientInfo.clientId,
-        _clientSecret: clientInfo.clientSecret,
-        _region: region,
-        _authMethod: authMethod,
-        _startUrl: startUrl,
-      };
-    },
-    pollToken: async (config, deviceCode, codeVerifier, extraData) => {
-      const region = extraData?._region || "us-east-1";
-      assertValidAwsRegion(region);
-      const tokenUrl = `https://oidc.${region}.amazonaws.com/token`;
-      const response = await fetch(tokenUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          clientId: extraData?._clientId,
-          clientSecret: extraData?._clientSecret,
-          deviceCode: deviceCode,
-          grantType: "urn:ietf:params:oauth:grant-type:device_code",
-        }),
-      });
-
-      let data;
-      try {
-        data = await response.json();
-      } catch (e) {
-        const text = await response.text();
-        data = { error: "invalid_response", error_description: text };
-      }
-
-      // AWS SSO OIDC returns camelCase
-      if (data.accessToken) {
-        return {
-          ok: true,
-          data: {
-            access_token: data.accessToken,
-            refresh_token: data.refreshToken,
-            expires_in: data.expiresIn,
-            profile_arn: data?.profileArn || null,
-            // Store client credentials for refresh
-            _clientId: extraData?._clientId,
-            _clientSecret: extraData?._clientSecret,
-            _region: extraData?._region,
-            _authMethod: extraData?._authMethod,
-            _startUrl: extraData?._startUrl,
-          },
-        };
-      }
-
-      return {
-        ok: false,
-        data: {
-          error: data.error || "authorization_pending",
-          error_description: data.error_description || data.message,
-        },
-      };
-    },
-    mapTokens: (tokens) => {
-      const email = extractEmailFromAccessToken(tokens.access_token);
-      const mapped = {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token,
-        expiresIn: tokens.expires_in,
-        email,
-        providerSpecificData: {
-          profileArn: tokens?.profile_arn || null,
-          clientId: tokens._clientId,
-          clientSecret: tokens._clientSecret,
-          region: tokens._region || "us-east-1",
-          authMethod: tokens._authMethod || "builder-id",
-          startUrl: tokens._startUrl || KIRO_CONFIG.startUrl,
-        },
-      };
-      return mapped;
-    },
-  },
+  kiro,
 
   cursor: {
     config: CURSOR_CONFIG,
@@ -1671,77 +1412,7 @@ const PROVIDERS = {
     }),
   },
 
-  kimchi: {
-    config: KIMCHI_CONFIG,
-    flowType: "browser_token",
-    buildAuthUrl: (config, redirectUri, state) => {
-      const baseUrl = (config.webAppUrl || "https://app.kimchi.dev").replace(/\/+$/, "");
-      const params = new URLSearchParams({
-        callback: redirectUri,
-        state,
-      });
-      return `${baseUrl}/cli-auth?${params.toString()}`;
-    },
-    exchangeToken: async (config, token) => {
-      const accessToken = String(token || "").trim();
-      if (!accessToken) {
-        throw new Error("Missing Kimchi token");
-      }
-
-      const validationUrl = config.validationUrl || "https://api.cast.ai/v1/llm/openai/supported-providers";
-      const validationRes = await fetch(validationUrl, {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
-      if (!validationRes.ok) {
-        throw new Error(`Kimchi token validation failed: ${validationRes.status}`);
-      }
-
-      let userInfo = {};
-      if (config.userInfoUrl) {
-        try {
-          const userRes = await fetch(config.userInfoUrl, {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              Authorization: `Bearer ${accessToken}`,
-            },
-          });
-          if (userRes.ok) {
-            userInfo = await userRes.json();
-          }
-        } catch {
-          userInfo = {};
-        }
-      }
-
-      return {
-        access_token: accessToken,
-        token_type: "Bearer",
-        _kimchiUser: userInfo,
-      };
-    },
-    mapTokens: (tokens) => {
-      const user = tokens._kimchiUser || {};
-      const userId = user.id ? String(user.id) : "";
-      const username = user.username || "";
-      const email = user.email || (userId ? `kimchi-user-${userId}` : null);
-      return {
-        accessToken: tokens.access_token,
-        refreshToken: null,
-        email,
-        displayName: user.name || username || null,
-        providerSpecificData: {
-          authMethod: "browser_token",
-          userId,
-          username,
-        },
-      };
-    },
-  },
+  kimchi,
 };
 
 /**

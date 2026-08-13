@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import { Modal, Button, Input } from "@/shared/components";
 
 function cursorReducer(state, action) {
@@ -23,12 +23,15 @@ function cursorReducer(state, action) {
 export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
   const [state, dispatch] = useReducer(cursorReducer, { accessToken: "", machineId: "", error: null, importing: false, autoDetecting: false, autoDetected: false, windowsManual: false });
   const { accessToken, machineId, error, importing, autoDetecting, autoDetected, windowsManual } = state;
+  const flowIdRef = useRef(0);
 
   const runAutoDetect = async () => {
+    const flowId = ++flowIdRef.current;
     dispatch({ type: "AUTO_DETECT_START" });
     try {
       const res = await fetch("/api/oauth/cursor/auto-import");
       const data = await res.json();
+      if (flowId !== flowIdRef.current || !isOpen) return;
 
       if (data.found) {
         dispatch({ type: "AUTO_DETECT_DONE", found: true, accessToken: data.accessToken, machineId: data.machineId });
@@ -38,13 +41,18 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
         dispatch({ type: "AUTO_DETECT_DONE", error: data.error || "Could not auto-detect tokens" });
       }
     } catch (err) {
-      dispatch({ type: "AUTO_DETECT_DONE", error: "Failed to auto-detect tokens" });
+      if (flowId === flowIdRef.current && isOpen) {
+        dispatch({ type: "AUTO_DETECT_DONE", error: "Failed to auto-detect tokens" });
+      }
     }
   };
 
   // Auto-detect tokens when modal opens
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      flowIdRef.current += 1;
+      return;
+    }
     runAutoDetect();
   }, [isOpen]);
 
@@ -59,6 +67,7 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
       return;
     }
 
+    const flowId = flowIdRef.current;
     dispatch({ type: "IMPORT_START" });
 
     try {
@@ -76,11 +85,14 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
       if (!res.ok) {
         throw new Error(data.error || "Import failed");
       }
+      if (flowId !== flowIdRef.current || !isOpen) return;
 
       onSuccess?.();
       onClose();
     } catch (err) {
-      dispatch({ type: "IMPORT_DONE", error: err.message });
+      if (flowId === flowIdRef.current && isOpen) {
+        dispatch({ type: "IMPORT_DONE", error: err.message });
+      }
     }
   };
 

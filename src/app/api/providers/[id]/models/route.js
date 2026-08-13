@@ -4,11 +4,13 @@ import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/sha
 import { GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, refreshCodexToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost, getStaticProviderModels } from "open-sse/config/providers.js";
+import { PROVIDER_OAUTH } from "open-sse/providers/index.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
+import { getKimchiUserAgent } from "open-sse/utils/kimchiUserAgent.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -267,6 +269,14 @@ const PROVIDER_MODELS_CONFIG = {
   nvidia: createOpenAIModelsConfig("https://integrate.api.nvidia.com/v1/models"),
   assemblyai: createOpenAIModelsConfig("https://api.assemblyai.com/v1/models"),
   "vercel-ai-gateway": createOpenAIModelsConfig("https://ai-gateway.vercel.sh/v1/models"),
+  kimchi: {
+    url: PROVIDER_OAUTH.kimchi?.modelsUrl,
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    parseResponse: (data) => data?.data || data?.models || [],
+  },
   cursor: {
     customResolver: async (connection) => {
       const result = await resolveCursorModels({
@@ -330,6 +340,7 @@ const PROVIDER_MODELS_CONFIG = {
     customResolver: async (connection) => {
       const credentials = {
         accessToken: connection.accessToken,
+        apiKey: connection.apiKey,
         refreshToken: connection.refreshToken,
         email: connection.email,
         displayName: connection.displayName,
@@ -554,6 +565,7 @@ export async function GET(request, { params }) {
 
     // Build headers
     const headers = { ...config.headers };
+    if (connection.provider === "kimchi") headers["User-Agent"] = getKimchiUserAgent();
     if (config.authHeader && !config.authQuery) {
       headers[config.authHeader] = (config.authPrefix || "") + token;
     }

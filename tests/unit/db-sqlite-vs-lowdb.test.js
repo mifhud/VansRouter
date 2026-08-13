@@ -127,15 +127,42 @@ describe("DB SQLite layer — public API parity", () => {
     await sqliteDb.deleteProxyPool(p2.id);
   });
 
-  it("combos: CRUD", async () => {
-    const c = await sqliteDb.createCombo({ name: "combo1", models: ["m1", "m2"], kind: "fallback" });
+  it("proxyPoolFitness: atomic scopes, provider clearing, pool deletion, roundtrip", async () => {
+    const pool = await sqliteDb.createProxyPool({ name: "fitness", proxyUrl: "http://fitness" });
+    const until = Date.now() + 60000;
+    const first = await sqliteDb.upsertProxyPoolFitness(pool.id, "freebuff::model-a", until, "limited");
+    expect(first).toMatchObject({ poolId: pool.id, scope: "freebuff::model-a", until, reason: "limited" });
+    const updated = await sqliteDb.upsertProxyPoolFitness(pool.id, "freebuff::model-a", until + 1, "updated");
+    expect(updated).toMatchObject({ until: until + 1, reason: "updated" });
+    await sqliteDb.upsertProxyPoolFitness(pool.id, "freebuff::*", until, "provider");
+    const all = await sqliteDb.listProxyPoolFitness();
+    expect(all.filter((entry) => entry.poolId === pool.id)).toHaveLength(2);
+
+    await sqliteDb.clearProxyPoolFitness("freebuff");
+    expect(await sqliteDb.listProxyPoolFitness(pool.id)).toEqual([]);
+    await sqliteDb.upsertProxyPoolFitness(pool.id, "openai::model", until, "retry");
+    const snapshot = await sqliteDb.exportDb();
+    expect(snapshot.proxyPoolFitness).toEqual(expect.arrayContaining([
+      expect.objectContaining({ poolId: pool.id, scope: "openai::model" }),
+    ]));
+    await sqliteDb.importDb(snapshot);
+    expect(await sqliteDb.listProxyPoolFitness(pool.id)).toHaveLength(1);
+
+    await sqliteDb.deleteProxyPool(pool.id);
+    expect(await sqliteDb.listProxyPoolFitness(pool.id)).toEqual([]);
+  });
+
+  it("combos: CRUD persists context_length", async () => {
+    const c = await sqliteDb.createCombo({ name: "combo1", models: ["m1", "m2"], kind: "fallback", context_length: 128000 });
     expect(c.id).toBeDefined();
-    expect(c.models).toEqual(["m1", "m2"]);
+    expect(c.context_length).toBe(128000);
     const byName = await sqliteDb.getComboByName("combo1");
     expect(byName.id).toBe(c.id);
-    await sqliteDb.updateCombo(c.id, { models: ["m3"] });
+    expect(byName.context_length).toBe(128000);
+    await sqliteDb.updateCombo(c.id, { models: ["m3"], context_length: 64000 });
     const updated = await sqliteDb.getComboById(c.id);
     expect(updated.models).toEqual(["m3"]);
+    expect(updated.context_length).toBe(64000);
     expect(await sqliteDb.deleteCombo(c.id)).toBe(true);
   });
 

@@ -91,7 +91,7 @@ export async function handleFetch(request) {
 
   // SSRF guard: reject internal/private/metadata targets
   try {
-    assertPublicUrl(targetUrl);
+    await assertPublicUrl(targetUrl);
   } catch (err) {
     log.warn("FETCH", "Blocked URL", { url: targetUrl });
     return errorResponse(HTTP_STATUS.BAD_REQUEST, err.message);
@@ -223,13 +223,11 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
           providerSpecificData: newCreds.providerSpecificData,
           testStatus: "active"
         });
-      },
-      onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials);
       }
     });
 
     if (result.success) {
+      await clearAccountError(credentials.connectionId, credentials);
       return new Response(JSON.stringify(result.data), {
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
       });

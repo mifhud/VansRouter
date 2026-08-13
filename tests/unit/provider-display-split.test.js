@@ -26,6 +26,12 @@ describe("provider display split (E1)", () => {
     }
   });
 
+  it("resolves registry risk notice tokens for provider pages", async () => {
+    const { AI_PROVIDERS } = await import("../../src/shared/constants/providers.js");
+    expect(AI_PROVIDERS.antigravity.deprecationNotice).toContain("subscription/OAuth session");
+    expect(AI_PROVIDERS.antigravity.deprecationNotice).not.toBe("RISK_NOTICE");
+  });
+
   it("helpers still work after split", async () => {
     const m = await import("../../src/shared/constants/providers.js");
     expect(m.ALIAS_TO_ID.kr).toBe("kiro");

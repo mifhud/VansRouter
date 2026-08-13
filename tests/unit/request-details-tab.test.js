@@ -56,10 +56,9 @@ describe("request details — tab crash-risk cases", () => {
     expect(res.pagination.totalItems).toBeGreaterThanOrEqual(0);
   });
 
-  it("invalid startDate → Invalid Date ISO throws inside getRequestDetails is caught upstream", async () => {
-    // new Date("bad").toISOString() throws RangeError; verify it surfaces
-    // so the API route's try/catch returns 500 rather than silent corruption.
-    await expect(db.getRequestDetails({ startDate: "not-a-date" })).rejects.toThrow();
+  it("invalid startDate → gracefully ignores invalid date filter", async () => {
+    const res = await db.getRequestDetails({ startDate: "not-a-date" });
+    expect(Array.isArray(res.details)).toBe(true);
   });
 
   it("valid date filter range → no throw", async () => {
@@ -235,11 +234,11 @@ describe("API route contract — validation boundary", () => {
     expect(body.pagination.pageSize).toBe(20);
   });
 
-  it("invalid startDate → route catches, returns 500 (not thrown)", async () => {
+  it("invalid startDate → ignores invalid date filter, returns 200", async () => {
     const res = await GET(makeReq("startDate=not-a-date"));
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toBeDefined();
+    expect(Array.isArray(body.details)).toBe(true);
   });
 
   it("valid request → 200 with details + pagination shape", async () => {

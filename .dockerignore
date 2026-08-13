@@ -9,10 +9,33 @@
 # Dependencies and build output
 node_modules
 .next
+.next-cli-build
 out
 build
 dist
 coverage
+
+# Non-runtime repository content
+.git
+.github
+.docs
+.gitbook
+.kilo
+.kilocode
+.kimchi
+.kiro
+.playwright-mcp
+.understand-anything
+cli
+images
+server
+tests
+data
+docs
+i18n
+skills
+*.md
+!README.md
 
 # Runtime data and logs
 data

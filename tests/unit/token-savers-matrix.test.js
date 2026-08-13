@@ -52,10 +52,9 @@ const PROVIDER_FORMAT = {
   "ollama-local": FORMATS.OLLAMA,
 };
 
-// Formats whose native shape has NO system-prompt surface — caveman/ponytail no-op
 // cursor/commandcode are OpenAI-shaped (messages[]) and DO get injected via default handler.
-// kiro uses conversationState shape which systemInject doesn't handle.
-const NO_SYSTEM_SURFACE = new Set([FORMATS.KIRO]);
+// Kiro uses its native top-level systemPrompt field.
+const NO_SYSTEM_SURFACE = new Set();
 
 // A long, compressible git-diff tool output (>500 bytes → above MIN_COMPRESS_SIZE)
 function bigDiff() {
@@ -77,6 +76,7 @@ function buildBodyForFormat(format, { withToolResult = false } = {}) {
       };
     case FORMATS.KIRO:
       return {
+        systemPrompt: "Base system.",
         conversationState: {
           currentMessage: {
             userInputMessage: {
@@ -133,7 +133,7 @@ function readSystemText(body, format) {
         ? body.system
         : Array.isArray(body.system) ? body.system.map((b) => b.text).join("\n") : "";
     case FORMATS.KIRO:
-      return body?.conversationState?.currentMessage?.userInputMessage?.content || "";
+      return body.systemPrompt || "";
     case FORMATS.OPENAI_RESPONSES:
       return body.instructions || "";
     case FORMATS.GEMINI:

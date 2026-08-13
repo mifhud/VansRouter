@@ -31,9 +31,11 @@ import { SSE_DONE } from "../utils/sseConstants.js";
 import { FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import {
   QODER_CHAT_URL_ENCODED,
+  QODER_CHAT_BASE_ALT,
+  QODER_CHAT_SIG_PATH,
   QODER_MODEL_MAP,
 } from "../shared/qoder/constants.js";
-import { getQoderModelConfig, resolveQoderModels } from "../services/qoderModels.js";
+import { getQoderModelConfig, resolveQoderModels, isQoderPat, resolveQoderCredentials } from "../services/qoderModels.js";
 
 /**
  * Hoist role:"system" messages out of the messages array (Qoder rejects
@@ -230,9 +232,8 @@ function wrapQoderSSE(response, model) {
   let buffer = "";
   let doneEmitted = false;
 
-  // Process one already-extracted SSE line (no trailing newline). Returns
-  // false when the line indicated end-of-stream so the caller can stop
-  // forwarding any remaining chunks after [DONE].
+  const reader = response.body.getReader();
+
   const processLine = (line, controller) => {
     const trimmed = line.replace(/\r$/, "").trim();
     if (!trimmed) return;
@@ -278,45 +279,47 @@ function wrapQoderSSE(response, model) {
     controller.enqueue(encoder.encode(`data: ${sanitized}\n\n`));
   };
 
-  const transform = new TransformStream({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let nl;
-      while ((nl = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        processLine(line, controller);
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        while (!doneEmitted) {
+          const { done, value } = await reader.read();
+          if (done) {
+            buffer += decoder.decode();
+            if (buffer) processLine(buffer, controller);
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buffer.indexOf("\n")) !== -1) {
+            processLine(buffer.slice(0, nl), controller);
+            buffer = buffer.slice(nl + 1);
+            if (doneEmitted) {
+              await reader.cancel().catch(() => {});
+              controller.close();
+              return;
+            }
+          }
+        }
+      } catch {
+        // Emit a terminal marker below when the upstream aborts unexpectedly.
+      } finally {
+        if (!doneEmitted) {
+          try { controller.enqueue(encoder.encode(SSE_DONE)); doneEmitted = true; } catch {}
+        }
+        try { controller.close(); } catch {}
+        await reader.cancel().catch(() => {});
       }
     },
-    flush(controller) {
-      // Finalize the decoder so any pending multi-byte sequence is
-      // released into `buffer` instead of being silently dropped.
-      buffer += decoder.decode();
-      // Drain any trailing line that arrived without a terminating newline
-      // (e.g. upstream closed the socket immediately after the last write,
-      // or a CDN stripped the final CRLF). Without this, the chunk that
-      // carries finish_reason is silently lost.
-      if (buffer.length > 0) {
-        processLine(buffer, controller);
-        buffer = "";
-      }
-      if (!doneEmitted) {
-        controller.enqueue(encoder.encode(SSE_DONE));
-        doneEmitted = true;
-      }
+    cancel() {
+      return reader.cancel().catch(() => {});
     },
   });
 
-  const transformed = response.body.pipeThrough(transform);
-  // Build a Response with passable headers; the streaming handler reads
-  // `.body` as a ReadableStream regardless of Content-Type.
-  return new Response(transformed, {
+  return new Response(stream, {
     status: response.status,
     statusText: response.statusText,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-    },
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
   });
 }
 
@@ -325,7 +328,11 @@ export class QoderExecutor extends BaseExecutor {
     super("qoder", PROVIDERS.qoder);
   }
 
-  buildUrl() {
+  buildUrl(credentials) {
+    const raw = credentials?.apiKey || credentials?.accessToken;
+    if (typeof raw === "string" && raw.startsWith("jt-")) {
+      return `${QODER_CHAT_BASE_ALT}/algo${QODER_CHAT_SIG_PATH}?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`;
+    }
     return QODER_CHAT_URL_ENCODED;
   }
 
@@ -335,8 +342,21 @@ export class QoderExecutor extends BaseExecutor {
   //   - COSY headers built from the *encoded* body bytes
   //   - response stream re-wrapped from {statusCodeValue, body} to OpenAI SSE
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
-    const url = this.buildUrl();
+    const rawToken = credentials?.apiKey || credentials?.accessToken;
+    if (isQoderPat(rawToken)) {
+      try {
+        credentials = await resolveQoderCredentials(credentials, proxyOptions, signal);
+      } catch (err) {
+        log?.error?.("QODER", `PAT exchange failed: ${err.message}`);
+        const fakeResp = new Response(
+          JSON.stringify({ error: { message: `qoder PAT exchange failed: ${err.message}` } }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        );
+        return { response: fakeResp, url: this.buildUrl(credentials), headers: {}, transformedBody: body };
+      }
+    }
 
+    const url = this.buildUrl(credentials);
     const psd = credentials?.providerSpecificData || {};
     if (!psd.userId) {
       // No user id → no way to sign. Surface a 401 so the dashboard nudges

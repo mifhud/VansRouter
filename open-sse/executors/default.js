@@ -8,6 +8,7 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { getKimchiUserAgent } from "../utils/kimchiUserAgent.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -41,7 +42,7 @@ function applyAuth(headers, desc, credentials) {
 const HEADER_HOOKS = {
   // Stable device_id from OAuth connection (CLIProxyAPI KimiTokenStorage.DeviceID)
   kimiHeaders: (h, c) => Object.assign(h, buildKimiHeaders(c?.providerSpecificData?.deviceId)),
-  kimchiHeaders: (h) => { h["User-Agent"] = "kimchi/0.1.39"; },
+  kimchiHeaders: (h) => { h["User-Agent"] = getKimchiUserAgent(); },
   clineHeaders: (h, c) => Object.assign(h, buildClineHeaders(c.apiKey || c.accessToken)),
   kilocodeOrg: (h, c) => { if (c.providerSpecificData?.orgId) h["X-Kilocode-OrganizationID"] = c.providerSpecificData.orgId; },
   claudeOverlay: (h) => {
@@ -53,7 +54,7 @@ const HEADER_HOOKS = {
         const staticBetaStr = h[titleKey] || h[lcKey] || "";
         const flags = new Set(staticBetaStr.split(",").map(f => f.trim()).filter(Boolean));
         for (const f of cached[lcKey].split(",").map(f => f.trim()).filter(Boolean)) flags.add(f);
-        cached[lcKey] = Array.from(flags).join(",");
+        h[titleKey] = Array.from(flags).join(",");
       }
       if (titleKey !== lcKey && h[titleKey] !== undefined) delete h[titleKey];
     }
@@ -281,7 +282,8 @@ export class DefaultExecutor extends BaseExecutor {
     const headers = { "Content-Type": "application/json", ...(rt ? rt.headers : this.config.headers) };
     const desc = rt?.auth || AUTH_DESCRIPTORS[this.provider] || this.resolveAuthDescriptor();
     // Hooks run BEFORE auth so dynamic overlays (claude cached headers) can't clobber the token.
-    for (const hook of desc.hooks || []) HEADER_HOOKS[hook]?.(headers, credentials);
+    const hooks = desc.hooks || desc.apiKey?.hooks || desc.oauth?.hooks || [];
+    for (const hook of hooks) HEADER_HOOKS[hook]?.(headers, credentials);
     applyAuth(headers, desc, credentials);
 
     // Strip first-party Claude Code identity headers for non-Anthropic anthropic-compatible upstreams

@@ -24,11 +24,15 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
   const currentEndpointLabel = KIRO_ENDPOINT_LABELS[currentEndpoint] || "CodeWhisperer";
 
   const proxyPoolMap = new Map((proxyPools || []).map((pool) => [pool.id, pool]));
-  const boundProxyPoolId = connection.providerSpecificData?.proxyPoolId || null;
+  const selectedProxyIds = connection.providerSpecificData?.proxyPoolIds || (connection.providerSpecificData?.proxyPoolId ? [connection.providerSpecificData.proxyPoolId] : []);
+  const rotationStrategy = connection.providerSpecificData?.proxyRotationStrategy || "none";
+  const boundProxyPoolId = selectedProxyIds[0] || connection.providerSpecificData?.proxyPoolId || null;
   const boundProxyPool = boundProxyPoolId ? proxyPoolMap.get(boundProxyPoolId) : null;
   const hasLegacyProxy = connection.providerSpecificData?.connectionProxyEnabled === true && !!connection.providerSpecificData?.connectionProxyUrl;
   const hasAnyProxy = !!boundProxyPoolId || hasLegacyProxy;
-  const proxyDisplayText = boundProxyPool
+  const proxyDisplayText = selectedProxyIds.length > 1
+    ? `${selectedProxyIds.length} pools (${rotationStrategy})`
+    : boundProxyPool
     ? `Pool: ${boundProxyPool.name}`
     : boundProxyPoolId
       ? `Pool: ${boundProxyPoolId} (inactive/missing)`
@@ -85,10 +89,25 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
   const handleSelectProxy = async (poolId) => {
     setUpdatingProxy(true);
     try {
-      await onUpdateProxy(poolId === "__none__" ? null : poolId);
+      if (poolId === "__none__") {
+        await onUpdateProxy(null);
+      } else {
+        await onUpdateProxy(poolId);
+      }
     } finally {
       setUpdatingProxy(false);
+    }
+  };
+
+  const handleAdvancedProxy = async (strategy, ids) => {
+    const activeIds = ids.filter((id) => proxyPoolMap.get(id)?.isActive === true);
+    if (!activeIds.length) return;
+    setUpdatingProxy(true);
+    try {
+      await onUpdateProxy({ proxyPoolIds: activeIds, proxyRotationStrategy: strategy });
       setShowProxyDropdown(false);
+    } finally {
+      setUpdatingProxy(false);
     }
   };
 
@@ -310,12 +329,24 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
               </button>
               {showProxyDropdown && (
                 <div className="absolute right-0 top-full z-50 mt-1 max-w-[78vw] min-w-[160px] rounded-lg border border-border bg-bg py-1 shadow-lg">
+                  {rotationStrategy === "smart" && <p className="px-3 py-1 text-[10px] text-text-muted">Smart skips unfit pools for this provider/model.</p>}
                   <button
                     onClick={() => handleSelectProxy("__none__")}
                     className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${!boundProxyPoolId ? "text-primary font-medium" : "text-text-main"}`}
                   >
                     None
                   </button>
+                  <p className="px-3 pt-2 text-[10px] font-medium uppercase text-text-muted">Rotation</p>
+                  {["fill-first", "round-robin", "random", "smart"].map((strategy) => (
+                    <button
+                      key={strategy}
+                      onClick={() => handleAdvancedProxy(strategy, selectedProxyIds.length > 1 ? selectedProxyIds : (proxyPools || []).filter((pool) => pool.isActive).map((pool) => pool.id))}
+                      className={`w-full px-3 py-1.5 text-left text-sm hover:bg-black/5 dark:hover:bg-white/5 ${rotationStrategy === strategy ? "font-medium text-primary" : "text-text-main"}`}
+                    >
+                      {strategy === "smart" ? "Smart (provider/model aware)" : strategy}
+                    </button>
+                  ))}
+                  <p className="px-3 pt-2 text-[10px] font-medium uppercase text-text-muted">Single pool</p>
                   {(proxyPools || []).map((pool) => (
                     <button
                       key={pool.id}

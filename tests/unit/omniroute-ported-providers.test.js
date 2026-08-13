@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import REGISTRY from "../../open-sse/providers/registry/index.js";
 import { PROVIDERS, PROVIDER_MODELS } from "../../open-sse/providers/index.js";
+import { ALIAS_TO_ID, AI_PROVIDERS, getAclProviderList, resolveProviderId } from "@/shared/constants/providers";
+import { isProviderAllowed } from "@/sse/services/auth.js";
 
 /**
  * Providers ported from OmniRoute in this batch. They are expected to be
@@ -30,6 +32,32 @@ const PORTED_PROVIDER_IDS = [
   "volcengine",
   "wandb",
 ];
+
+describe("SambaNova compatibility metadata", () => {
+  const sambanova = REGISTRY.find((entry) => entry.id === "sambanova");
+
+  it("preserves the visible alias and curated model catalog", () => {
+    expect(sambanova.alias).toBe("samba");
+    expect(sambanova.uiAlias).toBe("samba");
+    expect(sambanova.models.map((model) => model.id)).toEqual([
+      "MiniMax-M2.7",
+      "DeepSeek-V3.2",
+      "Llama-4-Maverick-17B-128E-Instruct",
+      "Meta-Llama-3.3-70B-Instruct",
+      "gpt-oss-120b",
+    ]);
+  });
+
+  it("resolves the additive alias without hiding SambaNova from ACL", async () => {
+    expect(sambanova.aliases).toEqual(["sambanova-ai"]);
+    expect(sambanova.authModes).toEqual(["apikey"]);
+    expect(resolveProviderId("sambanova-ai")).toBe("sambanova");
+    expect(ALIAS_TO_ID["sambanova-ai"]).toBe("sambanova");
+    expect(AI_PROVIDERS.sambanova.alias).toBe("samba");
+    expect(getAclProviderList().some((provider) => provider.alias === "samba")).toBe(true);
+    expect(await isProviderAllowed({ allowedProviders: ["sambanova-ai"] }, "sambanova-ai")).toBe(true);
+  });
+});
 
 describe("OmniRoute-ported providers", () => {
   it("registers every ported provider exactly once", () => {

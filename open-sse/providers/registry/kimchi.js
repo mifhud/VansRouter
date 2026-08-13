@@ -11,12 +11,13 @@ export default {
     website: "https://kimchi.dev",
     notice: {
       apiKeyUrl: "https://app.kimchi.dev/settings",
+      signupUrl: "https://app.kimchi.dev",
     },
   },
   category: "freeTier",
   authType: "apikey",
-  hasOAuth: false,
-  authModes: ["apikey"],
+  hasOAuth: true,
+  authModes: ["apikey", "oauth"],
   serviceKinds: ["llm", "webSearch"],
   searchConfig: {
     baseUrl: "https://llm.kimchi.dev/v1/search",
@@ -32,11 +33,15 @@ export default {
     format: "openai",
     timeoutMs: 20000,
     headers: {
-      "User-Agent": "kimchi/0.1.39",
       Accept: "text/event-stream,application/json",
     },
     auth: {
       apiKey: {
+        header: "Authorization",
+        scheme: "bearer",
+        hooks: ["kimchiHeaders"],
+      },
+      oauth: {
         header: "Authorization",
         scheme: "bearer",
         hooks: ["kimchiHeaders"],
@@ -50,6 +55,13 @@ export default {
       503: { attempts: 3, delayMs: 1000 },
     },
   },
+  oauth: {
+    webAppUrl: "https://app.kimchi.dev",
+    validationUrl: "https://api.cast.ai/v1/llm/openai/supported-providers",
+    userInfoUrl: "https://app.kimchi.dev/api/v1/me",
+    modelsUrl: "https://llm.kimchi.dev/v1/models/metadata?include_in_cli=true",
+  },
+  passthroughModels: true,
   // Exactly the 4 models advertised by the Kimchi CLI (kimchi-dev provider).
   models: [
     { id: "kimi-k2.7", name: "Kimi K2.7" },

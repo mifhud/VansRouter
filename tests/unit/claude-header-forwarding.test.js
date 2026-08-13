@@ -144,7 +144,7 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
     DefaultExecutor = mod.DefaultExecutor || mod.default;
   });
 
-  it("overlays live cached headers over static provider defaults", () => {
+  it("overlays live cached headers over static provider defaults", async () => {
     const executor = new DefaultExecutor("claude");
     const headers = executor.buildHeaders({ apiKey: "sk-test" }, true);
 
@@ -157,6 +157,8 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
     expect(betaFlags).toContain("interleaved-thinking-2025-05-14");
     expect(headers["x-stainless-package-version"]).toBe("0.74.0");
     expect(headers["x-stainless-os"]).toBe("MacOS");
+    const cached = (await import("open-sse/utils/claudeHeaderCache.js")).getCachedClaudeHeaders();
+    expect(cached["anthropic-beta"]).toBe("claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14");
   });
 
   it("removes conflicting Title-Case static keys when cached lowercase keys exist", () => {

@@ -21,7 +21,8 @@ import {
   QODER_MODEL_MAP,
 } from "../../src/lib/qoder/constants.js";
 import { PROVIDER_MODELS } from "../../open-sse/config/providerModels.js";
-import { __test__ as qoderExecutorInternals } from "../../open-sse/executors/qoder.js";
+import { QoderExecutor, __test__ as qoderExecutorInternals } from "../../open-sse/executors/qoder.js";
+import { isQoderPat } from "../../open-sse/services/qoderModels.js";
 
 // Convenience aliases — tests were originally written against module-level
 // helpers; the QoderService class wraps them so each test creates its own
@@ -29,6 +30,21 @@ import { __test__ as qoderExecutorInternals } from "../../open-sse/executors/qod
 const generatePkcePair = () => new QoderService().generatePkcePair();
 const initiateDeviceFlow = () => new QoderService().initiateDeviceFlow();
 const parseExpiry = QoderService.parseExpiry;
+
+describe("Qoder PAT credentials", () => {
+  it("recognizes only Qoder personal tokens", () => {
+    expect(isQoderPat("pt-example")).toBe(true);
+    expect(isQoderPat("jt-example")).toBe(false);
+    expect(isQoderPat("")).toBe(false);
+    expect(isQoderPat(null)).toBe(false);
+  });
+
+  it("routes resolved job tokens to api2", () => {
+    const executor = new QoderExecutor();
+    expect(executor.buildUrl({ accessToken: "jt-example" })).toContain("https://api2.qoder.sh");
+    expect(executor.buildUrl({ accessToken: "dt-example" })).toContain("https://api3.qoder.sh");
+  });
+});
 
 describe("QODER_MODEL_MAP", () => {
   it("allows Qoder's latest model key", () => {
@@ -373,13 +389,14 @@ describe("wrapQoderSSE", () => {
   const { wrapQoderSSE } = qoderExecutorInternals;
 
   // Helper: build a fake Response carrying the given lines as the body.
-  function makeResponse(lines, { status = 200 } = {}) {
+  function makeResponse(lines, { status = 200, onCancel, close = true } = {}) {
     const body = new ReadableStream({
       start(controller) {
         const encoder = new TextEncoder();
         for (const line of lines) controller.enqueue(encoder.encode(line));
-        controller.close();
+        if (close) controller.close();
       },
+      cancel: onCancel,
     });
     return new Response(body, { status });
   }
@@ -451,6 +468,18 @@ describe("wrapQoderSSE", () => {
     expect(dataLine).toBeDefined();
     // Body sans "data: " prefix should be valid JSON.
     expect(() => JSON.parse(dataLine.slice("data: ".length))).not.toThrow();
+  });
+
+  it("cancels the upstream reader after a terminal event", async () => {
+    let cancelled = false;
+    const inner = JSON.stringify({ choices: [{ delta: { content: "hi" } }] });
+    const upstream = `data: ${JSON.stringify({ statusCodeValue: 200, body: inner })}\n\ndata: [DONE]\n\n`;
+    const wrapped = wrapQoderSSE(
+      makeResponse([upstream], { close: false, onCancel: () => { cancelled = true; } }),
+      "qoder/auto",
+    );
+    await drain(wrapped);
+    expect(cancelled).toBe(true);
   });
 
   it("upstream error envelope produces an error chunk + [DONE]", async () => {

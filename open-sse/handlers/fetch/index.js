@@ -49,7 +49,10 @@ function truncate(text, max) {
 }
 
 function parseJinaTitle(text) {
-  const m = String(text || "").match(/^\s*#\s+(.+)$/m);
+  const source = String(text || "");
+  const metadataTitle = source.match(/^\s*Title:\s*(.+)$/mi);
+  if (metadataTitle) return metadataTitle[1].trim();
+  const m = source.match(/^\s*#\s+(.+)$/m);
   return m ? m[1].trim() : null;
 }
 

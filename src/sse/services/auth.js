@@ -55,9 +55,13 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       if (strategy !== "none") {
         const allPools = await getProxyPools({ isActive: true });
         const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+        const scope = `${providerId}::${model || "*"}`;
+        pickedId = pickProxyPoolId(poolIds, strategy, providerId, { scope });
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
+      const selectedPoolIds = strategy !== "none"
+        ? (await getProxyPools({ isActive: true })).filter((p) => p.proxyUrl).map((p) => p.id)
+        : [];
       return {
         id: "noauth",
         connectionName: "Public",
@@ -69,6 +73,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionNoProxy: resolvedProxy.connectionNoProxy,
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+          proxyPoolId: resolvedProxy.proxyPoolId || null,
+          strictProxy: resolvedProxy.strictProxy === true,
+          proxyPoolIds: selectedPoolIds,
+          proxyRotationStrategy: strategy,
+          proxyPoolScope: `${providerId}::${model || "*"}`,
         },
       };
     }
@@ -178,7 +187,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections[0];
     }
 
-    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+    const psdForProxy = connection.providerSpecificData?.proxyPoolIds?.length
+      ? { ...connection.providerSpecificData, proxyPoolScope: `${providerId}::${model || ""}` }
+      : connection.providerSpecificData;
+    const resolvedProxy = await resolveConnectionProxyConfig(psdForProxy || {}, connection.id);
 
     return {
       authType: connection.authType,
@@ -199,6 +211,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionNoProxy: resolvedProxy.connectionNoProxy,
         connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+        proxyPoolId: resolvedProxy.proxyPoolId || null,
+        strictProxy: resolvedProxy.strictProxy === true,
       },
       connectionId: connection.id,
       // Include current status for optimization check
@@ -327,7 +341,13 @@ export async function clearAccountError(connectionId, currentConnection, model =
 
   // Only reset error state if no active locks remain
   if (remainingActiveLocks.length === 0) {
-    Object.assign(clearObj, { testStatus: "active", lastError: null, lastErrorAt: null, backoffLevel: 0 });
+    Object.assign(clearObj, {
+      testStatus: "active",
+      lastError: null,
+      errorCode: null,
+      lastErrorAt: null,
+      backoffLevel: 0
+    });
   }
 
   await updateProviderConnection(connectionId, clearObj);

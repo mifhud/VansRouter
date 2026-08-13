@@ -251,13 +251,14 @@ export async function POST(request, { params }) {
       const tokenData = await exchangeTokens(provider, code, redirectUri, codeVerifier, state, meta);
 
       // Save to database
+      const expiresAt = tokenData.expiresIn
+        ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString()
+        : null;
       const connection = await createProviderConnection({
         provider,
         authType: "oauth",
         ...tokenData,
-        expiresAt: tokenData.expiresIn 
-          ? new Date(Date.now() + tokenData.expiresIn * 1000).toISOString() 
-          : null,
+        expiresAt,
         testStatus: "active",
       });
 

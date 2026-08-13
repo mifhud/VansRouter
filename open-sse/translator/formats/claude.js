@@ -10,13 +10,15 @@ import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
 
 // Check if message has valid non-empty content
-function hasValidContent(msg) {
+export function hasValidContent(msg) {
   if (typeof msg.content === "string" && msg.content.trim()) return true;
   if (Array.isArray(msg.content)) {
     return msg.content.some(block =>
       (block.type === CLAUDE_BLOCK.TEXT && block.text?.trim()) ||
       block.type === CLAUDE_BLOCK.TOOL_USE ||
-      block.type === CLAUDE_BLOCK.TOOL_RESULT
+      block.type === CLAUDE_BLOCK.TOOL_RESULT ||
+      block.type === CLAUDE_BLOCK.IMAGE ||
+      block.type === CLAUDE_BLOCK.DOCUMENT
     );
   }
   return false;

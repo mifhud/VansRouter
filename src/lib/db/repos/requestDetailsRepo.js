@@ -152,8 +152,14 @@ export async function getRequestDetails(filter = {}) {
   if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
   if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
   if (filter.status) { conds.push("status = ?"); params.push(filter.status); }
-  if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
-  if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
+  if (filter.startDate) {
+    const d = new Date(filter.startDate);
+    if (!Number.isNaN(d.getTime())) { conds.push("timestamp >= ?"); params.push(d.toISOString()); }
+  }
+  if (filter.endDate) {
+    const d = new Date(filter.endDate);
+    if (!Number.isNaN(d.getTime())) { conds.push("timestamp <= ?"); params.push(d.toISOString()); }
+  }
 
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const cntRow = db.get(`SELECT COUNT(*) as c FROM requestDetails ${where}`, params);

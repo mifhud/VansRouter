@@ -33,6 +33,8 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     return "/callback?code=...";
   });
   const callbackProcessedRef = useRef(false);
+  const callbackProcessingRef = useRef(false);
+  const flowIdRef = useRef(0);
   const onSuccessRef = useRef(onSuccess);
   useEffect(() => {
     onSuccessRef.current = onSuccess;
@@ -43,6 +45,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   // Exchange tokens
   const exchangeTokens = useCallback(async (code, state) => {
     if (!authData) return;
+    const flowId = flowIdRef.current;
     try {
       const res = await fetch(`/api/oauth/${provider}/exchange`, {
         method: "POST",
@@ -58,17 +61,22 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      if (flowId !== flowIdRef.current) return;
 
       setStep("success");
       onSuccessRef.current?.();
+      return true;
     } catch (err) {
+      if (flowId !== flowIdRef.current) return false;
       setError(err.message);
       setStep("error");
+      return false;
     }
   }, [authData, provider, oauthMeta]);
 
   const completeXaiManualCode = useCallback(async (code) => {
     if (!authData?.state) return;
+    const flowId = flowIdRef.current;
     try {
       const res = await fetch("/api/oauth/xai/manual-code", {
         method: "POST",
@@ -77,10 +85,12 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      if (flowId !== flowIdRef.current || !openedRef.current) return;
 
       setStep("success");
       onSuccessRef.current?.();
     } catch (err) {
+      if (flowId !== flowIdRef.current || !openedRef.current) return;
       setError(err.message);
       setStep("error");
     }
@@ -88,6 +98,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
   // Poll for device code token
   const startPolling = useCallback(async (deviceCode, codeVerifier, interval, extraData, deadlineMs) => {
+    const flowId = flowIdRef.current;
     pollingAbortRef.current = false;
     setPolling(true);
     // Honor the upstream's expires_in when supplied (qoder sets 300s) so we
@@ -98,7 +109,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
     while (Date.now() < deadline) {
       // Check if polling should be aborted
-      if (pollingAbortRef.current) {
+      if (pollingAbortRef.current || flowId !== flowIdRef.current || !openedRef.current) {
         console.log("[OAuthModal] Polling aborted");
         setPolling(false);
         return;
@@ -121,6 +132,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         });
 
         const data = await res.json();
+        if (flowId !== flowIdRef.current || !openedRef.current) return;
 
         if (data.success) {
           pollingAbortRef.current = true; // Stop polling immediately
@@ -153,6 +165,9 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   // Start OAuth flow
   const startOAuthFlow = useCallback(async () => {
     if (!provider) return;
+    const flowId = ++flowIdRef.current;
+    callbackProcessedRef.current = false;
+    pollingAbortRef.current = false;
     try {
       setError(null);
 
@@ -167,6 +182,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         "codebuddy-cn",
         "qoder",
         "grok-cli",
+        "freebuff",
       ];
       if (deviceCodeProviders.includes(provider)) {
         setIsDeviceCode(true);
@@ -183,6 +199,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         const res = await fetch(deviceCodeUrl.toString());
         const data = await res.json();
         if (!res.ok) throw new Error(data.error);
+        if (flowId !== flowIdRef.current || !openedRef.current) return;
 
         setDeviceData(data);
 
@@ -250,6 +267,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       const res = await fetch(authorizeUrl.toString());
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      if (flowId !== flowIdRef.current || !openedRef.current) return;
 
       // Codex: start proxy with server-side session (auto-exchange) + fallback to channels
       let codexProxyActive = false;
@@ -263,6 +281,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
           proxyUrl.searchParams.set("redirect_uri", redirectUri);
           const proxyRes = await fetch(proxyUrl.toString());
           const proxyData = await proxyRes.json();
+          if (flowId !== flowIdRef.current || !openedRef.current) return;
           codexProxyActive = proxyData.success;
           codexServerSide = !!proxyData.serverSide;
         } catch {
@@ -332,12 +351,15 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         }
       }
     } catch (err) {
+      if (flowId !== flowIdRef.current || !openedRef.current) return;
       setError(err.message);
       setStep("error");
     }
   }, [provider, isLocalhost, startPolling, oauthMeta, idcConfig]);
 
   const resetOAuthState = useCallback(() => {
+    flowIdRef.current += 1;
+    callbackProcessedRef.current = false;
     setAuthData(null);
     setCallbackUrl("");
     setError(null);
@@ -360,6 +382,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       pollingAbortRef.current = false;
       startOAuthFlow();
     } else if (justClosed) {
+      flowIdRef.current += 1;
       pollingAbortRef.current = true;
       openedRef.current = false;
       if (provider === "codex") {
@@ -418,12 +441,14 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   useEffect(() => {
     if (!authData) return;
     callbackProcessedRef.current = false; // Reset when authData changes
+    callbackProcessingRef.current = false;
 
     // Handler for callback data - only process once
     const handleCallback = async (data) => {
-      if (callbackProcessedRef.current) return; // Already processed
+      if (callbackProcessedRef.current || callbackProcessingRef.current) return;
 
       const { code, state, error: callbackError, errorDescription } = data;
+      if (state !== authData.state) return;
 
       if (callbackError) {
         callbackProcessedRef.current = true;
@@ -433,8 +458,10 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       }
 
       if (code) {
-        callbackProcessedRef.current = true;
-        await exchangeTokens(code, state);
+        callbackProcessingRef.current = true;
+        const succeeded = await exchangeTokens(code, state);
+        callbackProcessingRef.current = false;
+        if (succeeded) callbackProcessedRef.current = true;
       }
     };
 

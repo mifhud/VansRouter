@@ -44,7 +44,7 @@ export const refreshGoogleToken = (refreshToken, clientId, clientSecret) =>
 const refreshQwenToken = (refreshToken) =>
   _refreshQwenToken(refreshToken, log);
 
-const refreshCodexToken = (refreshToken) =>
+export const refreshCodexToken = (refreshToken) =>
   _refreshCodexToken(refreshToken, log);
 
 const refreshIflowToken = (refreshToken) =>

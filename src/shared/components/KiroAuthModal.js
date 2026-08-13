@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Modal, Button, Input } from "@/shared/components";
 
 /**
@@ -20,11 +20,13 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
   const [autoDetecting, setAutoDetecting] = useState(false);
   const [autoDetected, setAutoDetected] = useState(false);
   const [idcCredentials, setIdcCredentials] = useState(null);
+  const flowIdRef = useRef(0);
 
   // Auto-detect token when import method is selected
   useEffect(() => {
     if (selectedMethod !== "import" || !isOpen) return;
 
+    const flowId = ++flowIdRef.current;
     const autoDetect = async () => {
       setAutoDetecting(true);
       setError(null);
@@ -34,6 +36,7 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
       try {
         const res = await fetch("/api/oauth/kiro/auto-import");
         const data = await res.json();
+        if (flowId !== flowIdRef.current || !isOpen || selectedMethod !== "import") return;
 
         if (data.found) {
           setRefreshToken(data.refreshToken);
@@ -52,9 +55,11 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
           setError(data.error || "Could not auto-detect token");
         }
       } catch (err) {
-        setError("Failed to auto-detect token");
+        if (flowId === flowIdRef.current && isOpen && selectedMethod === "import") {
+          setError("Failed to auto-detect token");
+        }
       } finally {
-        setAutoDetecting(false);
+        if (flowId === flowIdRef.current) setAutoDetecting(false);
       }
     };
 
@@ -62,11 +67,13 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
   }, [selectedMethod, isOpen]);
 
   const handleMethodSelect = (method) => {
+    flowIdRef.current += 1;
     setSelectedMethod(method);
     setError(null);
   };
 
   const handleBack = () => {
+    flowIdRef.current += 1;
     setSelectedMethod(null);
     setError(null);
   };
@@ -77,6 +84,7 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
       return;
     }
 
+    const flowId = ++flowIdRef.current;
     setImporting(true);
     setError(null);
 
@@ -95,13 +103,14 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }) {
       if (!res.ok) {
         throw new Error(data.error || "Import failed");
       }
+      if (flowId !== flowIdRef.current || !isOpen) return;
 
       // Success - notify parent to refresh connections
       onMethodSelect("import");
     } catch (err) {
-      setError(err.message);
+      if (flowId === flowIdRef.current && isOpen) setError(err.message);
     } finally {
-      setImporting(false);
+      if (flowId === flowIdRef.current) setImporting(false);
     }
   };
 

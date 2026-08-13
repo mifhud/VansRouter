@@ -84,7 +84,7 @@ export async function POST(request) {
     // SSRF guard for remote callers; local host keeps self-hosted nodes (e.g. ollama-local)
     if (!isLocalRequest(request)) {
       try {
-        assertPublicUrl(baseUrl);
+        await assertPublicUrl(baseUrl);
       } catch {
         return NextResponse.json({ error: "URL not allowed" }, { status: 400 });
       }

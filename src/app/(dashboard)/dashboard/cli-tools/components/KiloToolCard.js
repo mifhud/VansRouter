@@ -1,83 +1,19 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useReducer } from "react";
+import { useState } from "react";
+import useCliToolLifecycle from "./useCliToolLifecycle";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
 import Image from "next/image";
 import BaseUrlSelect from "./BaseUrlSelect";
 import ApiKeySelect from "./ApiKeySelect";
 import { matchKnownEndpoint } from "./cliEndpointMatch";
 
-function toolCardReducer(state, action) {
-  switch (action.type) {
-    case "CHECK_START": return { ...state, checking: true };
-    case "CHECK_DONE": return { ...state, status: action.data, checking: false };
-    case "APPLY_START": return { ...state, applying: true, message: null };
-    case "APPLY_DONE": return { ...state, applying: false, message: action.message };
-    case "RESTORE_START": return { ...state, restoring: true, message: null };
-    case "RESTORE_DONE": return { ...state, restoring: false, message: action.message };
-    default: return state;
-  }
-}
-
 export default function KiloToolCard({ tool, isExpanded, onToggle, baseUrl, apiKeys, activeProviders, cloudEnabled, initialStatus, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl }) {
-  const [state, dispatch] = useReducer(toolCardReducer, {
-    status: initialStatus || null,
-    checking: false,
-    applying: false,
-    restoring: false,
-    message: null,
-  });
-  const { status, checking, applying, restoring, message } = state;
+  const { status, checking, applying, restoring, message, dispatch, checkStatus, customBaseUrl, getDisplayUrl, getEffectiveBaseUrl, handleToggle, modelAliases, selectedApiKey, setCustomBaseUrl, setSelectedApiKey } = useCliToolLifecycle({ apiKeys, baseUrl, cloudEnabled, initialStatus, isExpanded, onToggle, statusEndpoint: "/api/cli-tools/kilo-settings" });
   const [showInstallGuide, setShowInstallGuide] = useState(false);
-  const [selectedApiKeyOverride, setSelectedApiKey] = useState(null);
-  const selectedApiKey = selectedApiKeyOverride ?? (apiKeys?.length > 0 ? apiKeys[0].key : "");
   const [selectedModel, setSelectedModel] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
-  const [modelAliases, setModelAliases] = useState({});
   const [showManualConfigModal, setShowManualConfigModal] = useState(false);
-  const [customBaseUrl, setCustomBaseUrl] = useState("");
-
-  const fetchModelAliases = useCallback(async () => {
-    try {
-      const res = await fetch("/api/models/alias");
-      const data = await res.json();
-      if (res.ok) setModelAliases(data.aliases || {});
-    } catch (error) {
-      console.log("Error fetching model aliases:", error);
-    }
-  }, []);
-
-  const checkStatus = useCallback(async () => {
-    dispatch({ type: "CHECK_START" });
-    try {
-      const res = await fetch("/api/cli-tools/kilo-settings");
-      const data = await res.json();
-      dispatch({ type: "CHECK_DONE", data });
-    } catch (error) {
-      dispatch({ type: "CHECK_DONE", data: { installed: false, error: error.message } });
-    }
-  }, []);
-
-  const statusFetchedRef = useRef(!!initialStatus);
-  const aliasesFetchedRef = useRef(false);
-
-  const initializeCard = useCallback(async () => {
-    if (!statusFetchedRef.current) {
-      statusFetchedRef.current = true;
-      await checkStatus();
-    }
-    if (!aliasesFetchedRef.current) {
-      aliasesFetchedRef.current = true;
-      await fetchModelAliases();
-    }
-  }, [checkStatus, fetchModelAliases]);
-
-  const handleToggle = useCallback(() => {
-    if (!isExpanded) initializeCard();
-    onToggle();
-  }, [isExpanded, initializeCard, onToggle]);
-
-  useEffect(() => { initializeCard(); }, [initializeCard]);
 
   const getConfigStatus = () => {
     if (!status?.installed) return null;
@@ -85,13 +21,6 @@ export default function KiloToolCard({ tool, isExpanded, onToggle, baseUrl, apiK
   };
 
   const configStatus = getConfigStatus();
-
-  const getEffectiveBaseUrl = () => {
-    const url = customBaseUrl || `${baseUrl}/v1`;
-    return url.endsWith("/v1") ? url : `${url}/v1`;
-  };
-
-  const getDisplayUrl = () => customBaseUrl || `${baseUrl}/v1`;
 
   const handleApply = async () => {
     dispatch({ type: "APPLY_START" });

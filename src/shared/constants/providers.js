@@ -1,6 +1,6 @@
 // Provider definitions
 import REGISTRY from "open-sse/providers/registry/index.js";
-import { RISK_NOTICE } from "@/shared/constants/providersDisplay";
+import { resolveProviderDisplay } from "./providersDisplay.js";
 
 const MEDIA_ENTRY_KEYS = [
   "serviceKinds", "ttsConfig", "sttConfig", "embeddingConfig",
@@ -16,12 +16,12 @@ function buildProviderEntry(r) {
   for (const k of MEDIA_ENTRY_KEYS) {
     if (r[k] !== undefined) mediaFields[k] = r[k];
   }
-  const display = { ...(r.display || {}) };
-  if (display.deprecationNotice === "RISK_NOTICE") display.deprecationNotice = RISK_NOTICE;
+  const display = resolveProviderDisplay(r.display || {});
   return {
     ...display,
     id: r.id,
     alias: r.uiAlias || r.alias,
+    ...(r.aliases ? { aliases: r.aliases } : {}),
     ...(r.hidden ? { hidden: true } : {}),
     ...mediaFields,
     ...(r.priority !== undefined ? { priority: r.priority } : {}),
@@ -110,7 +110,7 @@ export const AUTH_METHODS = {
 // Helper: Get provider by alias
 export function getProviderByAlias(alias) {
   for (const provider of Object.values(AI_PROVIDERS)) {
-    if (provider.alias === alias || provider.id === alias) {
+    if (provider.alias === alias || provider.id === alias || provider.aliases?.includes(alias)) {
       return provider;
     }
   }
@@ -132,6 +132,7 @@ export function getProviderAlias(providerId) {
 // Alias to ID mapping (for quick lookup)
 export const ALIAS_TO_ID = Object.values(AI_PROVIDERS).reduce((acc, p) => {
   acc[p.alias] = p.id;
+  for (const alias of p.aliases || []) acc[alias] = p.id;
   return acc;
 }, {});
 

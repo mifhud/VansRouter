@@ -33,6 +33,8 @@ export default function NineRemotePromoModal({ isOpen, onClose }) {
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    // Intentional client-mount gate for portal/browser-only rendering.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
 

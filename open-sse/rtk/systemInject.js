@@ -20,13 +20,26 @@ export function injectSystemPrompt(body, format, prompt) {
       // Antigravity wraps Gemini shape in body.request → injectGeminiSystem handles it
       injectGeminiSystem(body, prompt);
       return;
+    case FORMATS.KIRO:
+      injectKiroSystem(body, prompt);
+      return;
     default:
-      // OpenAI and OpenAI-shaped formats (responses/codex/cursor/kiro/ollama)
+      // OpenAI and OpenAI-shaped formats (responses/codex/cursor/ollama)
       injectMessagesSystem(body, prompt);
   }
 }
 
 // OpenAI-shaped: messages[] (chat) or input[] (responses) or instructions (responses string)
+// Kiro shape: top-level systemPrompt. Keep the provider's native field separate
+// from conversationState so injection survives translation without rewriting messages.
+function injectKiroSystem(body, prompt) {
+  if (typeof body.systemPrompt === "string" && body.systemPrompt.trim()) {
+    body.systemPrompt = `${body.systemPrompt}${SEP}${prompt}`;
+  } else {
+    body.systemPrompt = prompt;
+  }
+}
+
 function injectMessagesSystem(body, prompt) {
   // OpenAI Responses API: top-level string field
   if (typeof body.instructions === "string") {

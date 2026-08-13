@@ -61,6 +61,8 @@ export default function ModelSelectModal({
 
   useEffect(() => {
     if (!isOpen || cursorConnectionIds.length === 0) {
+      // Intentional reset when the modal's external selection changes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCursorModels([]);
       return undefined;
     }

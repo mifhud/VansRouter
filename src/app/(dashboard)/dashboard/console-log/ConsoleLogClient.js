@@ -94,6 +94,8 @@ export default function ConsoleLogClient() {
   };
 
   useEffect(() => {
+    // Intentional initial synchronization with the external log stream.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchSystemLogs();
 
     const es = new EventSource("/api/translator/console-logs/stream");

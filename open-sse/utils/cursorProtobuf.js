@@ -207,13 +207,19 @@ export function encodeField(fieldNum, wireType, value) {
     return concatArrays(tagBytes, valueBytes);
   }
 
+  if (wireType === WIRE_TYPE.FIXED64) {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setFloat64(0, Number(value), true);
+    return concatArrays(tagBytes, bytes);
+  }
+
   if (wireType === WIRE_TYPE.LEN) {
-    const dataBytes = typeof value === "string" 
+    const dataBytes = typeof value === "string"
       ? new TextEncoder().encode(value)
       : value instanceof Uint8Array ? value
       : Buffer.isBuffer(value) ? new Uint8Array(value)
       : new Uint8Array(0);
-    
+
     const lengthBytes = encodeVarint(dataBytes.length);
     return concatArrays(tagBytes, lengthBytes, dataBytes);
   }
@@ -711,7 +717,7 @@ function decodeField(buffer, offset) {
   return [fieldNum, wireType, value, pos];
 }
 
-function decodeMessage(data) {
+export function decodeMessage(data) {
   const fields = new Map();
   let pos = 0;
 
@@ -886,6 +892,17 @@ export function extractTextFromResponse(payload) {
   }
 }
 
-// ==================== EXPORTS ====================
+// AgentService codecs remain re-exported for compatibility with existing callers.
+export {
+  encodeAgentValue,
+  decodeAgentValue,
+  encodeMcpToolDefinition,
+  encodeMcpTools,
+  decodeMcpArgs,
+  encodeMcpResultSuccess,
+  encodeMcpResultError,
+  encodeMcpResultToolNotFound,
+} from "./cursorAgentProtobuf.js";
 
+// ==================== EXPORTS ====================
 

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useReducer } from "react";
+import { useState } from "react";
+import useCliToolLifecycle from "./useCliToolLifecycle";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
 import Image from "next/image";
 import BaseUrlSelect from "./BaseUrlSelect";
@@ -169,90 +170,32 @@ function CodexExpandedSection({ activeProviders, apiKeys, applying, checkingCode
 
 
 export default function CodexToolCard({ tool, isExpanded, onToggle, baseUrl, apiKeys, activeProviders, cloudEnabled, initialStatus, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl }) {
-  const [state, dispatch] = useReducer((s, a) => {
-    switch (a.type) {
-      case "CHECK_START": return { ...s, checking: true };
-      case "CHECK_DONE": return { ...s, status: a.data, checking: false };
-      case "APPLY_START": return { ...s, applying: true, message: null };
-      case "APPLY_DONE": return { ...s, applying: false, message: a.message };
-      case "RESTORE_START": return { ...s, restoring: true, message: null };
-      case "RESTORE_DONE": return { ...s, restoring: false, message: a.message };
-      default: return s;
-    }
-  }, { status: initialStatus || null, checking: false, applying: false, restoring: false, message: null });
-  const codexStatus = state.status;
-  const checkingCodex = state.checking;
-  const { applying, restoring, message } = state;
+  const {
+    status: codexStatus, checking: checkingCodex, applying, restoring, message, dispatch,
+    checkStatus, customBaseUrl, getDisplayUrl, getEffectiveBaseUrl,
+    handleToggle, modelAliases, selectedApiKey, setCustomBaseUrl, setSelectedApiKey,
+  } = useCliToolLifecycle({
+    apiKeys, baseUrl, cloudEnabled, initialStatus, isExpanded, onToggle,
+    statusEndpoint: "/api/cli-tools/codex-settings",
+    getInitialApiKey: (status, keys) => {
+      const token = status?.auth?.OPENAI_API_KEY;
+      return token && keys?.some((key) => key.key === token) ? token : keys?.[0]?.key || "";
+    },
+  });
   const [showInstallGuide, setShowInstallGuide] = useState(false);
-  const [selectedApiKeyOverride, setSelectedApiKey] = useState(null);
-  const selectedApiKey = selectedApiKeyOverride ?? (apiKeys?.length > 0 ? apiKeys[0].key : "");
   const [selectedModelOverride, setSelectedModel] = useState(null);
   const selectedModel = selectedModelOverride ?? (() => {
-    if (codexStatus?.config) {
-      const modelMatch = codexStatus.config.match(/^model\s*=\s*"([^"]+)"/m);
-      if (modelMatch) return modelMatch[1];
-    }
-    return "";
+    const modelMatch = codexStatus?.config?.match(/^model\s*=\s*"([^"]+)"/m);
+    return modelMatch?.[1] || "";
   })();
   const [subagentModelOverride, setSubagentModel] = useState(null);
   const subagentModel = subagentModelOverride ?? (() => {
-    if (codexStatus?.config) {
-      const subagentModelMatch = codexStatus.config.match(/\[agents\.subagent\]\s*\n\s*model\s*=\s*"([^"]+)"/m);
-      if (subagentModelMatch) return subagentModelMatch[1];
-    }
-    return "";
+    const modelMatch = codexStatus?.config?.match(/\[agents\.subagent\]\s*\n\s*model\s*=\s*"([^"]+)"/m);
+    return modelMatch?.[1] || "";
   })();
   const [modalOpen, setModalOpen] = useState(false);
   const [subagentModalOpen, setSubagentModalOpen] = useState(false);
-  const [modelAliases, setModelAliases] = useState({});
   const [showManualConfigModal, setShowManualConfigModal] = useState(false);
-  const [customBaseUrl, setCustomBaseUrl] = useState("");
-
-  const fetchModelAliases = useCallback(async () => {
-    try {
-      const res = await fetch("/api/models/alias");
-      const data = await res.json();
-      if (res.ok) setModelAliases(data.aliases || {});
-    } catch (error) {
-      console.log("Error fetching model aliases:", error);
-    }
-  }, []);
-
-
-
-  const checkCodexStatus = useCallback(async () => {
-    dispatch({ type: "CHECK_START" });
-    try {
-      const res = await fetch("/api/cli-tools/codex-settings");
-      const data = await res.json();
-      dispatch({ type: "CHECK_DONE", data });
-    } catch (error) {
-      dispatch({ type: "CHECK_DONE", data: { installed: false, error: error.message } });
-    }
-  }, []);
-
-
-
-  const statusFetchedRef = useRef(!!initialStatus);
-  const aliasesFetchedRef = useRef(false);
-
-  const initializeCard = useCallback(async () => {
-    if (!statusFetchedRef.current) {
-      statusFetchedRef.current = true;
-      await checkCodexStatus();
-    }
-    if (!aliasesFetchedRef.current) {
-      aliasesFetchedRef.current = true;
-      await fetchModelAliases();
-    }
-  }, [checkCodexStatus, fetchModelAliases]);
-
-  const handleToggle = useCallback(() => {
-    if (!isExpanded) initializeCard();
-    onToggle();
-  }, [isExpanded, initializeCard, onToggle]);
-
-  useEffect(() => { initializeCard(); }, [initializeCard]);
 
   const getConfigStatus = () => {
     if (!codexStatus?.installed) return null;
@@ -264,13 +207,6 @@ export default function CodexToolCard({ tool, isExpanded, onToggle, baseUrl, api
 
   const configStatus = getConfigStatus();
 
-  const getEffectiveBaseUrl = () => {
-    const url = customBaseUrl || `${baseUrl}/v1`;
-    // Ensure URL ends with /v1
-    return url.endsWith("/v1") ? url : `${url}/v1`;
-  };
-
-  const getDisplayUrl = () => customBaseUrl || `${baseUrl}/v1`;
   const handleApplySettings = async () => {
     dispatch({ type: "APPLY_START" });
     try {
@@ -292,7 +228,7 @@ export default function CodexToolCard({ tool, isExpanded, onToggle, baseUrl, api
       const data = await res.json();
       if (res.ok) {
         dispatch({ type: "APPLY_DONE", message: { type: "success", text: "Settings applied successfully!" } });
-        checkCodexStatus();
+        checkStatus();
       } else {
         dispatch({ type: "APPLY_DONE", message: { type: "error", text: data.error || "Failed to apply settings" } });
       }
@@ -310,7 +246,7 @@ export default function CodexToolCard({ tool, isExpanded, onToggle, baseUrl, api
         dispatch({ type: "RESTORE_DONE", message: { type: "success", text: "Settings reset successfully!" } });
         setSelectedModel("");
         setSubagentModel("");
-        checkCodexStatus();
+        checkStatus();
       } else {
         dispatch({ type: "RESTORE_DONE", message: { type: "error", text: data.error || "Failed to reset settings" } });
       }

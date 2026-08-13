@@ -119,6 +119,8 @@ export default function LanguageSwitcher({ className = "", isOpen: controlledOpe
   // Prevent SSR document reference error
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    // Intentional client-mount gate for portal/browser-only rendering.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
 

@@ -2,6 +2,9 @@ import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 
+// OpenCode free tier limits requests per egress IP.
+const IP_LIMIT_BODY = /limit|rate|quota|exhausted|capacity|too many|retry/i;
+
 // Models that use /zen/v1/messages (claude format)
 const MESSAGES_MODELS = new Set();
 
@@ -28,5 +31,18 @@ export class OpenCodeExecutor extends BaseExecutor {
       "x-opencode-client": "desktop",
       "Accept": "text/event-stream"
     };
+  }
+
+  parseError(response, bodyText) {
+    const status = response?.status || 0;
+    const text = String(bodyText || "");
+    if ((status === 429 || status === 403) && IP_LIMIT_BODY.test(text)) {
+      return {
+        status,
+        message: text.slice(0, 300) || `OpenCode free limit (${status})`,
+        poolScoped: { reason: "ip-limit" },
+      };
+    }
+    return null;
   }
 }

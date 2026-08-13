@@ -135,4 +135,14 @@ export const TTS_PROVIDER_CONFIG = {
     voiceKey: "gemini-tts-voices",
     voicesPerModel: true,
   },
+  "xiaomi-mimo": {
+    hasLanguageHint: true,
+    hasStyleInput: true,
+    hasModelSelector: true,
+    hasBrowseButton: false,
+    voiceSource: "hardcoded",
+    modelKey: "xiaomi-mimo-tts-models",
+    voicesPerModel: true,
+    languageOptions: ["Chinese", "English"],
+  },
 };

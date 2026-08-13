@@ -83,6 +83,47 @@ describe("Schema migrations", () => {
     expect(aliases).toHaveLength(1);
   });
 
+  it("version 4 DB → adds context_length and preserves combo data", async () => {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const db = await getAdapter();
+    db.run(`INSERT INTO combos(id, name, kind, models, context_length, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?)`, [
+      "combo-1", "legacy-combo", "fallback", '["m1"]', 128000, "2024-01-01", "2024-01-01",
+    ]);
+    db.exec(`ALTER TABLE combos DROP COLUMN context_length`);
+    db.run(`UPDATE _meta SET value = '4' WHERE key = 'schemaVersion'`);
+    db.close?.();
+
+    delete global._dbAdapter;
+    vi.resetModules();
+    const { getAdapter: getAdapter2 } = await import("@/lib/db/driver.js");
+    const { latestVersion } = await import("@/lib/db/migrations/index.js");
+    const db2 = await getAdapter2();
+    expect(db2.all(`PRAGMA table_info(combos)`).map((c) => c.name)).toContain("context_length");
+    expect(db2.get(`SELECT name, models FROM combos WHERE id = 'combo-1'`)).toEqual({ name: "legacy-combo", models: '["m1"]' });
+    expect(parseInt(db2.get(`SELECT value FROM _meta WHERE key='schemaVersion'`).value, 10)).toBe(latestVersion());
+  });
+
+  it("failed migration can retry on the same adapter", async () => {
+    const { createSqlJsAdapter } = await import("@/lib/db/adapters/sqljsAdapter.js");
+    const { runMigrationOnce } = await import("@/lib/db/migrate.js");
+    const adapter = await createSqlJsAdapter(path.join(tempDir, "retry.sqlite"));
+    let fail = true;
+    const transaction = adapter.transaction;
+    adapter.transaction = (fn) => {
+      if (fail) {
+        fail = false;
+        throw new Error("transient migration failure");
+      }
+      return transaction(fn);
+    };
+
+    await expect(runMigrationOnce(adapter)).rejects.toThrow("transient migration failure");
+    await expect(runMigrationOnce(adapter)).resolves.toBeUndefined();
+    expect(parseInt(adapter.get(`SELECT value FROM _meta WHERE key='schemaVersion'`).value, 10)).toBe(8);
+    expect(adapter.all(`PRAGMA table_info(combos)`).map((c) => c.name)).toContain("context_length");
+    adapter.close();
+  });
+
   it("auto-sync re-creates missing index when DB lacks it", async () => {
     const { getAdapter } = await import("@/lib/db/driver.js");
     const db = await getAdapter();

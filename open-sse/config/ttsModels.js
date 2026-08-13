@@ -33,6 +33,10 @@ const GEMINI_VOICES = [
   "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 ].map((id) => ({ id, name: id, type: "tts" }));
 
+const MIMO_VOICES = [
+  "mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean",
+].map((id) => ({ id, name: id, type: "tts" }));
+
 // ── TTS Config (config-driven, single source of truth) ─────────────────────
 export const TTS_MODELS_CONFIG = {
   openai: {
@@ -106,6 +110,10 @@ export const TTS_MODELS_CONFIG = {
       "gemini-2.5-pro-preview-tts":   GEMINI_VOICES,
     },
     allVoices: GEMINI_VOICES,
+  },
+  "xiaomi-mimo": {
+    models: [{ id: "mimo-v2.5-tts", name: "MiMo V2.5 TTS", type: "tts" }],
+    voices: { "mimo-v2.5-tts": MIMO_VOICES },
   },
 };
 

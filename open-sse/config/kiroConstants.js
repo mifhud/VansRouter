@@ -15,11 +15,38 @@
  * fiction. The suffix is stripped before the request leaves this process.
  */
 
-import { extractThinking } from "../translator/concerns/thinkingUnified.js";
+import { extractThinking, parseSuffix } from "../translator/concerns/thinkingUnified.js";
 import { effortToBudget } from "../translator/concerns/thinking.js";
 
 export const KIRO_AGENTIC_SUFFIX = "-agentic";
 export const KIRO_THINKING_SUFFIX = "-thinking";
+export const KIRO_TOOL_NAME_MAX_LENGTH = 64;
+export const KIRO_TOOL_DESCRIPTION_MAX_LENGTH = 10237;
+export const KIRO_TOOL_ID_MAX_LENGTH = 64;
+
+/** Resolve a Kiro model after consuming the generic model(level) suffix. */
+export function resolveKiroModelIntent(model) {
+  const { cleanModel, override } = parseSuffix(model);
+  return { model: cleanModel, ...resolveKiroModel(cleanModel), thinkingOverride: override };
+}
+
+/** Apply a parsed model(level) override without mutating the caller's body. */
+export function applyKiroThinkingOverride(body, override) {
+  if (!override) return body;
+  const next = { ...body };
+  if (override.mode === "budget") {
+    delete next.output_config;
+    delete next.reasoning_effort;
+    delete next.reasoning;
+    next.thinking = { type: "enabled", budget_tokens: override.budget };
+    return next;
+  }
+  next.output_config = {
+    ...(body.output_config || {}),
+    effort: override.mode === "level" ? override.level : override.mode,
+  };
+  return next;
+}
 
 // Public default CodeWhisperer profile ARNs (us-east-1), keyed by auth method.
 // Used when an account cannot resolve its own profileArn. Builder ID and social

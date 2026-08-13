@@ -70,7 +70,12 @@ export async function parseUpstreamError(response, executor = null) {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
         const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
+        return {
+          statusCode: parsed.status || response.status,
+          message: msg,
+          resetsAtMs: parsed.resetsAtMs,
+          poolScoped: parsed.poolScoped,
+        };
       }
     } catch { /* fall through to default parsing */ }
   }

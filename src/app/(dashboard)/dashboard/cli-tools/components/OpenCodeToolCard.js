@@ -75,12 +75,12 @@ function OpenCodeExpandedSection({ activeModel, activeProviders, apiKeys, applyi
                 </div>
 
                 {/* Current configured */}
-                {status?.config?.provider?.["VansRoute"]?.options?.baseURL && (
+                {(status?.config?.provider?.VansRoute?.options?.baseURL || status?.config?.provider?.["9router"]?.options?.baseURL) && (
                   <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
                     <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Current</span>
                     <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
                     <span className="min-w-0 truncate rounded bg-surface/40 px-2 py-2 text-xs text-text-muted sm:py-1.5">
-                      {status.config.provider["VansRoute"].options.baseURL}
+                      {status.config.provider.VansRoute?.options?.baseURL || status.config.provider["9router"]?.options?.baseURL}
                     </span>
                   </div>
                 )}
@@ -251,8 +251,9 @@ export default function OpenCodeToolCard({ tool, isExpanded, onToggle, baseUrl, 
   const [selectedModel, setSelectedModel] = useState("");
   const [subagentModelOverride, setSubagentModel] = useState(null);
   const subagentModel = subagentModelOverride ?? (() => {
-    if (status?.config?.agent?.explorer?.model?.startsWith("VansRoute/"))
-      return status.config.agent.explorer.model.replace("VansRoute/", "");
+    const model = status?.config?.agent?.explorer?.model || "";
+    if (model.startsWith("VansRoute/")) return model.replace("VansRoute/", "");
+    if (model.startsWith("9router/")) return model.replace("9router/", "");
     return "";
   })();
   const [modalOpen, setModalOpen] = useState(false);
@@ -341,7 +342,9 @@ export default function OpenCodeToolCard({ tool, isExpanded, onToggle, baseUrl, 
     if (!status?.installed) return null;
     if (!status.config) return "not_configured";
     if (!status.hasVansRoute) return "not_configured";
-    const url = status.config?.provider?.["VansRoute"]?.options?.baseURL || "";
+    const url = status.config?.provider?.VansRoute?.options?.baseURL
+      || status.config?.provider?.["9router"]?.options?.baseURL
+      || "";
     return matchKnownEndpoint(url, { tunnelPublicUrl, tailscaleUrl }) ? "configured" : "other";
   };
 
@@ -421,7 +424,7 @@ export default function OpenCodeToolCard({ tool, isExpanded, onToggle, baseUrl, 
       filename: "~/.config/opencode/opencode.json",
       content: JSON.stringify({
         provider: {
-          "VansRoute": {
+          VansRoute: {
             npm: "@ai-sdk/openai-compatible",
             options: { baseURL: getEffectiveBaseUrl(), apiKey: keyToUse },
             models: modelsObj,

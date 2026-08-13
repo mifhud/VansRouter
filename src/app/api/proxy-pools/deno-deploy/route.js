@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { createProxyPool } from "@/models";
+import { RELAY_TARGET_GUARD_SOURCE } from "@/shared/utils/ssrfGuard.js";
+import { requireDashboardAuth } from "@/lib/auth/routeAuth.js";
 
 const DENO_V2_API = "https://api.deno.com/v2";
 
 const DENO_RELAY_CODE = `Deno.serve(async (request) => {
+  ${RELAY_TARGET_GUARD_SOURCE}
   const target = request.headers.get("x-relay-target");
   const relayPath = request.headers.get("x-relay-path") || "/";
 
@@ -14,7 +17,13 @@ const DENO_RELAY_CODE = `Deno.serve(async (request) => {
     });
   }
 
-  const targetUrl = target.replace(/\\/$/, "") + relayPath;
+  let targetUrl;
+  try {
+    targetUrl = new URL(relayPath, target.replace(/\\/$/, "")).toString();
+    assertTrustedTarget(targetUrl);
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "content-type": "application/json" } });
+  }
   const newHeaders = new Headers(request.headers);
   newHeaders.delete("x-relay-target");
   newHeaders.delete("x-relay-path");
@@ -45,6 +54,7 @@ const DENO_RELAY_CODE = `Deno.serve(async (request) => {
 });`;
 
 export async function POST(request) {
+  if (!await requireDashboardAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const body = await request.json();
     const denoToken = body.denoToken?.trim();

@@ -4,12 +4,12 @@
  */
 import { register } from "../registry.js";
 import { FORMATS } from "../formats.js";
-import { v4 as uuidv4 } from "uuid";
 import { randomUUID } from "node:crypto";
 import { applyKiroSessionReplay } from "../../utils/kiroSessionReplay.js";
 import { resolveContinuationId, resolveSessionIdentity } from "../../utils/sessionManager.js";
 import {
-  resolveKiroModel,
+  resolveKiroModelIntent,
+  applyKiroThinkingOverride,
   resolveKiroThinkingBudget,
   buildThinkingSystemPrefix,
   KIRO_AGENTIC_SYSTEM_PROMPT,
@@ -20,6 +20,7 @@ import {
 import { parseDataUri } from "../concerns/image.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
+import { canonicalizeKiroConversation, normalizeKiroToolSpecs } from "../concerns/kiroConversation.js";
 
 /** Render a single tool call as a readable text line. */
 function toolCallToText(name, input) {
@@ -58,71 +59,7 @@ function toolResultToText(content) {
  * Only invoked when the client did NOT send tools; when tools are present the
  * structured form is preserved.
  */
-function flattenToolInteractions(messages) {
-  const out = [];
-
-  for (const msg of messages) {
-    // OpenAI tool-result message → user text line
-    if (msg.role === ROLE.TOOL) {
-      out.push({ role: ROLE.USER, content: toolResultToText(msg.content) });
-      continue;
-    }
-
-    if (msg.role === ROLE.ASSISTANT) {
-      const parts = [];
-      if (Array.isArray(msg.content)) {
-        for (const c of msg.content) {
-          if (c.type === CLAUDE_BLOCK.TOOL_USE) {
-            parts.push(toolCallToText(c.name, c.input));
-          } else if (c.type === OPENAI_BLOCK.TEXT || c.text) {
-            parts.push(c.text || "");
-          }
-        }
-      } else if (typeof msg.content === "string") {
-        parts.push(msg.content);
-      }
-      for (const tc of msg.tool_calls || []) {
-        parts.push(toolCallToText(tc.function?.name, tc.function?.arguments));
-      }
-      out.push({ role: ROLE.ASSISTANT, content: parts.filter(Boolean).join("\n") });
-      continue;
-    }
-
-    // User messages: replace tool_result blocks with text, keep text + images.
-    if (msg.role === ROLE.USER && Array.isArray(msg.content)) {
-      const newContent = msg.content.map(c =>
-        c.type === CLAUDE_BLOCK.TOOL_RESULT
-          ? { type: OPENAI_BLOCK.TEXT, text: toolResultToText(c.content) }
-          : c
-      );
-      out.push({ ...msg, content: newContent });
-      continue;
-    }
-
-    out.push(msg);
-  }
-
-  return out;
-}
-
-/**
- * Reconcile orphaned toolResults — those whose toolUseId has no matching
- * toolUse in any assistant message. This happens when client-side compaction
- * truncates the conversation and removes the assistant message containing the
- * tool_use, but keeps the user message with the corresponding tool_result.
- *
- * A dangling structured reference makes Kiro return 400, so it must be removed.
- * But the client deliberately kept the result content through compaction, so
- * rather than discard it we fold it back into the user message as text — the
- * same shape flattenToolInteractions() produces. The 400 trigger (the
- * structured reference) is gone; the content survives.
- *
- * `messages` is every carrier that can hold toolResults — both history items
- * and the popped-out currentMessage (orphans can land on either).
- */
 function reconcileOrphanedToolResults(history, currentMessage) {
-  // Phase 1: collect all valid toolUseIds from assistant messages in history.
-  // (currentMessage is always a user turn, so it carries no toolUses.)
   const validIds = new Set();
   for (const h of history) {
     const arm = h.assistantResponseMessage;
@@ -132,8 +69,6 @@ function reconcileOrphanedToolResults(history, currentMessage) {
     }
   }
 
-  // Phase 2: across history + currentMessage, keep results with a matching
-  // toolUse and salvage the rest as text.
   const carriers = currentMessage ? [...history, currentMessage] : history;
   for (const item of carriers) {
     const uim = item.userInputMessage;
@@ -150,9 +85,8 @@ function reconcileOrphanedToolResults(history, currentMessage) {
       }
     }
 
-    if (salvaged.length === 0) continue; // no orphans — leave untouched
+    if (salvaged.length === 0) continue;
 
-    // Fold orphaned result content into the user text so it is not lost
     const extra = salvaged.join("\n");
     uim.content = uim.content ? `${uim.content}\n\n${extra}` : extra;
 
@@ -183,13 +117,7 @@ function convertMessages(messages, tools, model) {
 
   const clientProvidedTools = tools && tools.length > 0;
 
-  // When the client did not send tools, flatten any tool calls/results in the
-  // history into plain text (see flattenToolInteractions). This keeps the
-  // request honest and sidesteps Kiro's "tools required" 400, since no
-  // structured tool content survives to trigger it.
-  if (!clientProvidedTools) {
-    messages = flattenToolInteractions(messages);
-  }
+  // When the client did not send tools, tool calls/results are handled by canonicalizeKiroConversation.
 
   let pendingUserContent = [];
   let pendingAssistantContent = [];
@@ -327,7 +255,7 @@ function convertMessages(messages, tools, model) {
 
             pendingToolResults.push({
               toolUseId: block.tool_use_id,
-              status: "success",
+              status: block.is_error ? "error" : "success",
               content: [{ text: text }]
             });
           });
@@ -339,7 +267,7 @@ function convertMessages(messages, tools, model) {
         const toolContent = typeof msg.content === "string" ? msg.content : "";
         pendingToolResults.push({
           toolUseId: msg.tool_call_id,
-          status: "success",
+          status: msg.is_error || msg.status === "error" ? "error" : "success",
           content: [{ text: toolContent }]
         });
       } else if (content) {
@@ -525,11 +453,14 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   const temperature = body.temperature;
   const topP = body.top_p;
 
-  const { upstream: upstreamModel, agentic } = resolveKiroModel(model);
-  const thinkingBudget = resolveKiroThinkingBudget(body, credentials?.rawHeaders, model);
-  const additionalModelRequestFields = buildKiroAdditionalModelRequestFieldsForModel(body, upstreamModel);
-  const usesNativeGptEffort = usesKiroNativeGptEffort(body, upstreamModel);
+  const modelIntent = resolveKiroModelIntent(model);
+  const { upstream: upstreamModel, agentic } = modelIntent;
+  const thinkingBody = applyKiroThinkingOverride(body, modelIntent.thinkingOverride);
+  const thinkingBudget = resolveKiroThinkingBudget(thinkingBody, credentials?.rawHeaders, modelIntent.model);
+  const additionalModelRequestFields = buildKiroAdditionalModelRequestFieldsForModel(thinkingBody, upstreamModel);
+  const usesNativeGptEffort = usesKiroNativeGptEffort(thinkingBody, upstreamModel);
 
+  const { specs: toolSpecs, nameMap } = normalizeKiroToolSpecs(tools);
   const { history, currentMessage } = convertMessages(messages, tools, upstreamModel);
 
   // API-key (headless) auth uses a raw CodeWhisperer credential whose profile is
@@ -584,7 +515,14 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     history,
     currentMessage,
   });
-  const replayCurrent = replay.currentMessage?.userInputMessage || {};
+  const canonical = canonicalizeKiroConversation({
+    history: replay.history,
+    currentMessage: replay.currentMessage,
+    modelId: upstreamModel,
+    toolSpecs,
+    nameMap,
+  });
+  const replayCurrent = canonical.currentMessage.userInputMessage;
 
   const payload = {
     conversationState: {
@@ -605,7 +543,7 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
           })
         }
       },
-      history: replay.history
+      history: canonical.history
     },
     agentMode: "vibe",
   };

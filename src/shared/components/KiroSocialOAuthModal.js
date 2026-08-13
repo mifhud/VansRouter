@@ -27,10 +27,12 @@ export default function KiroSocialOAuthModal({ isOpen, provider, onSuccess, onCl
   const { copied, copy } = useCopyToClipboard();
   const openedRef = useRef(false);
   const prevOpenRef = useRef(false);
+  const flowIdRef = useRef(0);
 
   // Initialize auth flow when modal opens
   useEffect(() => {
     if (isOpen && !prevOpenRef.current && provider) {
+      const flowId = ++flowIdRef.current;
       openedRef.current = false;
       const initAuth = async () => {
         try {
@@ -42,6 +44,7 @@ export default function KiroSocialOAuthModal({ isOpen, provider, onSuccess, onCl
           if (!res.ok) {
             throw new Error(data.error);
           }
+          if (flowId !== flowIdRef.current || !isOpen) return;
 
           dispatch({ type: "AUTH_READY", authUrl: data.authUrl, data });
 
@@ -51,15 +54,21 @@ export default function KiroSocialOAuthModal({ isOpen, provider, onSuccess, onCl
             window.open(data.authUrl, "_blank");
           }
         } catch (err) {
-          dispatch({ type: "AUTH_ERROR", error: err.message });
+          if (flowId === flowIdRef.current && isOpen) {
+            dispatch({ type: "AUTH_ERROR", error: err.message });
+          }
         }
       };
       initAuth();
+    } else if (!isOpen && prevOpenRef.current) {
+      flowIdRef.current += 1;
+      openedRef.current = false;
     }
     prevOpenRef.current = isOpen;
   }, [isOpen, provider]);
 
   const handleManualSubmit = async () => {
+    const flowId = flowIdRef.current;
     try {
       dispatch({ type: "CLEAR_ERROR" });
       
@@ -83,6 +92,9 @@ export default function KiroSocialOAuthModal({ isOpen, provider, onSuccess, onCl
       if (!code) {
         throw new Error("No authorization code found in URL");
       }
+      if (!authData?.state || urlState !== authData.state) {
+        throw new Error("Invalid or expired authorization state");
+      }
 
       // Exchange code for tokens
       const res = await fetch("/api/oauth/kiro/social-exchange", {
@@ -97,11 +109,14 @@ export default function KiroSocialOAuthModal({ isOpen, provider, onSuccess, onCl
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      if (flowId !== flowIdRef.current || !isOpen) return;
 
       dispatch({ type: "SUCCESS" });
       onSuccess?.();
     } catch (err) {
-      dispatch({ type: "AUTH_ERROR", error: err.message });
+      if (flowId === flowIdRef.current && isOpen) {
+        dispatch({ type: "AUTH_ERROR", error: err.message });
+      }
     }
   };
 

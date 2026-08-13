@@ -127,6 +127,9 @@ export const KIMCHI_CONFIG = { ...PROVIDER_OAUTH["kimchi"] };
 // Endpoint: cli-chat-proxy.grok.com — same client_id as xai, different flow + scopes
 export const GROK_CLI_CONFIG = { ...PROVIDER_OAUTH["grok-cli"] };
 
+// Freebuff OAuth Configuration (Device Code Flow)
+export const FREEBUFF_CONFIG = { ...PROVIDER_OAUTH["freebuff"] };
+
 // OAuth timeout (5 minutes)
 export const OAUTH_TIMEOUT = 300000;
 
@@ -153,4 +156,5 @@ export const PROVIDERS = {
   ZCODE: "zcode",
   KIMCHI: "kimchi",
   GROK_CLI: "grok-cli",
+  FREEBUFF: "freebuff",
 };

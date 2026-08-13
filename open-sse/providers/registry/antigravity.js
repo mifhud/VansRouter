@@ -19,12 +19,7 @@ export default {
   category: "oauth",
   serviceKinds: ["llm", "image"],
   transport: {
-    // Gemini 3.6 Flash is only served from the daily Cloud Code host today.
-    // Keep production as fallback for older models if daily flakes.
-    baseUrls: [
-      "https://daily-cloudcode-pa.googleapis.com",
-      ANTIGRAVITY_IDE_BASE_URL,
-    ],
+    baseUrls: [ANTIGRAVITY_IDE_BASE_URL],
     format: "antigravity",
     headers: {
       "User-Agent": ANTIGRAVITY_IDE_USER_AGENT,
@@ -63,6 +58,7 @@ export default {
     { id: "gemini-3-flash", name: "Gemini 3 Flash", thinking: false },
     // Image generation models
     { id: "gemini-3.1-flash-image", name: "Gemini 3.1 Flash (Image)", kind: "image", imageGen: true, capabilities: ["textToImage"] },
+    { id: "gemini-3-pro-image", name: "Gemini 3 Pro (Image)", kind: "image", imageGen: true, capabilities: ["textToImage"] },
   ],
   oauth: {
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",

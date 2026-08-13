@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Modal, Button, Input } from "@/shared/components";
 
 /**
@@ -12,6 +12,11 @@ export default function IFlowCookieModal({ isOpen, onSuccess, onClose }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
+  const flowIdRef = useRef(0);
+
+  useEffect(() => {
+    if (!isOpen) flowIdRef.current += 1;
+  }, [isOpen]);
 
   const handleSubmit = async () => {
     if (!cookie.trim()) {
@@ -19,6 +24,7 @@ export default function IFlowCookieModal({ isOpen, onSuccess, onClose }) {
       return;
     }
 
+    const flowId = ++flowIdRef.current;
     setLoading(true);
     setError(null);
 
@@ -34,20 +40,23 @@ export default function IFlowCookieModal({ isOpen, onSuccess, onClose }) {
       if (!res.ok) {
         throw new Error(data.error || "Authentication failed");
       }
+      if (flowId !== flowIdRef.current || !isOpen) return;
 
       setSuccess(true);
       setTimeout(() => {
+        if (flowId !== flowIdRef.current || !isOpen) return;
         onSuccess?.();
         handleClose();
       }, 1500);
     } catch (err) {
-      setError(err.message);
+      if (flowId === flowIdRef.current && isOpen) setError(err.message);
     } finally {
-      setLoading(false);
+      if (flowId === flowIdRef.current) setLoading(false);
     }
   };
 
   const handleClose = () => {
+    flowIdRef.current += 1;
     setCookie("");
     setError(null);
     setSuccess(false);

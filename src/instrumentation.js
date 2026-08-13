@@ -10,6 +10,11 @@ export const runtime = "nodejs";
 const REACTIVATION_INTERVAL_MS = 3600_000; // 1 hour
 
 export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { initConsoleLogCapture } = await import("@/lib/consoleLogBuffer");
+    initConsoleLogCapture();
+  }
+
   // Skip in development: `next dev` bundles instrumentation with webpack and
   // cannot resolve Node built-ins (fs/os) pulled in by better-sqlite3 and some
   // provider registries. Production/standalone builds use the Node runtime and

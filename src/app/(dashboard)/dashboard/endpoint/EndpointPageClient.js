@@ -21,6 +21,7 @@ import EndpointRow from "./components/EndpointRow";
 import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
+import { buildProviderList } from "@/shared/utils/aclProviderList";
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -448,34 +449,11 @@ export default function APIPageClient({ machineId }) {
   // ── ACL Edit Key handlers ──────────────────────────────────────────
   const ALL_KINDS = ["llm", "embedding", "image", "tts", "stt", "webSearch", "webFetch"];
 
-  // Build unique provider list grouped from connections + nodes
-  const buildProviderList = (connections, nodes) => {
-    const nodeMap = {};
-    for (const n of (nodes || [])) {
-      // API returns prefix/apiType/baseUrl as top-level fields (parsed from data JSON)
-      nodeMap[n.id] = { name: n.name, prefix: n.prefix || null, type: n.type };
-    }
-    // Group connections by provider
-    const byProvider = {};
-    for (const c of (connections || [])) {
-      const p = c.provider;
-      if (!byProvider[p]) byProvider[p] = { id: p, count: 0, alias: c.alias || null };
-      byProvider[p].count++;
-    }
-    // Build final list with friendly names
-    return Object.values(byProvider).map(({ id, count, alias }) => {
-      const node = nodeMap[id];
-      let displayName = id;
-      let prefix = null;
-      if (node) {
-        displayName = node.name || id;
-        prefix = node.prefix || null;
-      }
-      return { id, displayName, prefix, alias, count };
-    }).sort((a, b) => a.displayName.localeCompare(b.displayName));
-  };
+  // Provider list for the ACL dialog is built by src/shared/utils/aclProviderList.js
+  // (connections + nodes + registered noAuth/free providers). Auth-requiring
+  // providers with zero connections are not shown.
 
-  const handleOpenEditKey = (key) => {
+  const handleOpenEditKey = async (key) => {
     setEditingKey(key);
     setEditName(key.name || "");
     const ap = key.allowedProviders;
@@ -563,16 +541,18 @@ export default function APIPageClient({ machineId }) {
       }
       let connections = [];
       let nodes = [];
+      let registered = [];
       if (providersRes.ok) {
         const pData = await providersRes.json();
         connections = pData.connections || [];
         if (pData.aliasMap) setAliasMap(pData.aliasMap);
+        registered = pData.providers || [];
       }
       if (nodesRes.ok) {
         const nData = await nodesRes.json();
         nodes = nData.nodes || [];
       }
-      setProviderList(buildProviderList(connections, nodes));
+      setProviderList(buildProviderList(connections, nodes, registered));
       if (combosRes.ok) {
         const cData = await combosRes.json();
         setComboList(cData.combos || []);

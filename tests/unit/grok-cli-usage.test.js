@@ -58,6 +58,46 @@ const USER_PROFILE = {
   subscriptionTier: null,
 };
 
+function encodeVarint(value) {
+  const bytes = [];
+  let v = BigInt(value);
+  do {
+    let byte = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v !== 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (v !== 0n);
+  return Buffer.from(bytes);
+}
+
+function encodeField(fieldNumber, wireType, body) {
+  return Buffer.concat([encodeVarint((fieldNumber << 3) | wireType), body]);
+}
+
+function encodeDelimitedField(fieldNumber, body) {
+  return encodeField(fieldNumber, 2, Buffer.concat([encodeVarint(body.length), body]));
+}
+
+function encodeCreditsResponse(usageRatio, resetSeconds = 1784825940) {
+  const ratio = Buffer.alloc(4);
+  ratio.writeFloatLE(usageRatio, 0);
+  const timestamp = encodeDelimitedField(5, Buffer.concat([
+    encodeField(1, 0, encodeVarint(resetSeconds)),
+  ]));
+  const credits = Buffer.concat([encodeField(1, 5, ratio), timestamp]);
+  const payload = encodeDelimitedField(1, credits);
+  const header = Buffer.alloc(5);
+  header.writeUInt32BE(payload.length, 1);
+  return Buffer.concat([header, payload]);
+}
+
+function binaryResponse(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "application/grpc-web+proto" },
+  });
+}
+
 describe("grok-cli registry usage flag", () => {
   it("exposes transport.usage urls", () => {
     const cfg = PROVIDERS["grok-cli"];
@@ -174,6 +214,7 @@ describe("getUsageForProvider(grok-cli)", () => {
     expect(billingCall[1].headers["x-userid"]).toBe(
       "d84768dd-224d-4052-ba49-0d336fa9160c",
     );
+    expect(proxyAwareFetch.mock.calls).toHaveLength(2);
   });
 
   it("surfaces auth-expired message on 401", async () => {
@@ -187,6 +228,7 @@ describe("getUsageForProvider(grok-cli)", () => {
     });
 
     expect(usage.message).toMatch(/expired|re-authorize/i);
+    expect(proxyAwareFetch.mock.calls).toHaveLength(2);
   });
 
   it("returns depleted on-demand bar without blocking message when cap is zero", async () => {
@@ -204,9 +246,37 @@ describe("getUsageForProvider(grok-cli)", () => {
     expect(usage.message).toBeUndefined();
     expect(usage.quotas["On-demand"].remainingPercentage).toBe(0);
     expect(usage.quotas["On-demand"].total).toBe(1);
+    expect(proxyAwareFetch.mock.calls).toHaveLength(2);
   });
 
-  it("reports active paid access when provider exposes no numeric quota", async () => {
+  it("falls back to gRPC weekly pool when paid REST quota is empty", async () => {
+    proxyAwareFetch
+      .mockResolvedValueOnce(jsonResponse(EXHAUSTED_BILLING))
+      .mockResolvedValueOnce(jsonResponse({ ...USER_PROFILE, subscriptionTier: "XPremiumPlus" }))
+      .mockResolvedValueOnce(binaryResponse(encodeCreditsResponse(0.35)));
+
+    const usage = await getUsageForProvider({
+      provider: "grok-cli",
+      accessToken: "test-token",
+    });
+
+    expect(usage.message).toBeUndefined();
+    expect(usage.plan).toBe("XPremiumPlus");
+    expect(usage.quotas["Weekly SuperGrok"]).toMatchObject({
+      used: 35,
+      total: 100,
+      remainingPercentage: 65,
+      resetAt: new Date(1784825940000).toISOString(),
+      unlimited: false,
+    });
+    expect(proxyAwareFetch.mock.calls[2][0]).toContain("GetGrokCreditsConfig");
+    expect(proxyAwareFetch.mock.calls[2][1].method).toBe("POST");
+    expect(Buffer.from(proxyAwareFetch.mock.calls[2][1].body)).toEqual(
+      Buffer.from([0, 0, 0, 0, 0]),
+    );
+  });
+
+  it("keeps paid subscription message when gRPC fallback fails", async () => {
     proxyAwareFetch
       .mockResolvedValueOnce(jsonResponse(EXHAUSTED_BILLING))
       .mockResolvedValueOnce(jsonResponse({
