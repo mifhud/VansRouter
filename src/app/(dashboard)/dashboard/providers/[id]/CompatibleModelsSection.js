@@ -126,8 +126,18 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
     const activeConnection = connections.find((conn) => conn.isActive !== false);
     if (!activeConnection) return;
 
+    const customModels = allModels.filter((m) => m.source === "custom");
+    if (customModels.length > 0) {
+      const confirmed = confirm(`Delete ${customModels.length} existing custom model(s) for "${providerDisplayAlias}" and re-import from /models?`);
+      if (!confirmed) return;
+    }
+
     setImporting(true);
     try {
+      for (const model of customModels) {
+        await onDeleteCustomModel(model.id);
+      }
+
       const res = await fetch(`/api/providers/${activeConnection.id}/models`);
       const data = await res.json();
       if (!res.ok) {
@@ -143,7 +153,6 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
       for (const model of models) {
         const modelId = model.id || model.name || model.model;
         if (!modelId) continue;
-        if (allModels.some((entry) => entry.id === modelId)) continue;
         await onAddCustomModel(modelId);
         importedCount += 1;
       }
