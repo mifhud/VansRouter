@@ -94,6 +94,7 @@ const MAX_CONTINUATION_SESSIONS = 5000;
 // Client headers/body fields that carry an upstream session id (priority order)
 const SESSION_HEADER_KEYS = ["x-session-id", "session-id", "session_id", "x-amp-thread-id"];
 const CLAUDE_CODE_SESSION_RE = /_session_([a-f0-9-]+)$/;
+const CLAUDE_CODE_SESSION_HEADER = "x-claude-code-session-id";
 
 function sha16(text) {
     return crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -135,7 +136,10 @@ function extractAntigravitySession(body) {
 }
 
 function extractClientSessionId(headers, body, scope = "") {
-    const claude = extractClaudeCodeSession(body?.metadata?.user_id);
+    // Claude Code sends the session in a header AND in metadata.user_id; the header
+    // survives translation to formats that drop metadata (e.g. Responses API).
+    const claude = extractClaudeCodeSession(body?.metadata?.user_id)
+        || headerValue(headers, CLAUDE_CODE_SESSION_HEADER);
     if (claude) return `claude:${claude}`;
     const antigravity = extractAntigravitySession(body);
     if (antigravity) return `antigravity:${antigravity}`;
@@ -165,11 +169,26 @@ function accumulateAssistantText(body) {
     if (!items) return "";
     let text = "";
     for (const item of items) {
-        if (item?.role !== "assistant") continue;
-        if (typeof item.content === "string") text += item.content;
-        else if (Array.isArray(item.content)) {
-            for (const c of item.content) text += c?.text || c?.output || "";
+        if (!item || typeof item !== "object") continue;
+        const isAssistant = item.role === "assistant" || item.type === "function_call" || item.type === "custom_tool_call";
+        if (!isAssistant) continue;
+
+        if (typeof item.content === "string") {
+            text += item.content;
+        } else if (Array.isArray(item.content)) {
+            for (const c of item.content) text += c?.text || c?.output || (typeof c === "string" ? c : "");
         }
+
+        if (Array.isArray(item.tool_calls)) {
+            for (const tc of item.tool_calls) {
+                text += `${tc?.function?.name || ""}:${tc?.function?.arguments || ""}`;
+            }
+        }
+
+        if (item.name || item.arguments) {
+            text += `${item.name || ""}:${item.arguments || ""}`;
+        }
+
         if (text.length >= ASSISTANT_CAP_LEN) break;
     }
     return text;

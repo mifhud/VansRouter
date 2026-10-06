@@ -16,6 +16,7 @@ const {
   resetSessionCache,
   rootAgentIdForModel,
   injectFreebuffMarker,
+  injectEndTurnTool,
   FREEBUFF_SYSTEM_MARKER,
 } = __test__;
 
@@ -207,6 +208,23 @@ describe("freebuff executor wire shape", () => {
     const ex = new FreebuffExecutor();
     expect(ex.buildUrl()).toBe("https://www.codebuff.com/api/v1/chat/completions");
   });
+
+  it("injects end_turn into tool calls without duplicating existing end_turn", () => {
+    const body = { tools: [{ type: "function", function: { name: "read_file" } }] };
+    const injected = injectEndTurnTool(body);
+    expect(injected.tools.map((tool) => tool.function.name)).toEqual(["read_file", "end_turn"]);
+    expect(injectEndTurnTool(injected)).toBe(injected);
+  });
+
+  it("explains the Freebuff tool gate on endpoint lookup errors", async () => {
+    const ex = new FreebuffExecutor();
+    const parsed = await ex.parseError(
+      { status: 404 },
+      JSON.stringify({ error: { message: "No endpoints found for deepseek/deepseek-v4-flash" } }),
+    );
+    expect(parsed.message).toMatch(/end_turn/i);
+    expect(parsed.resetsAtMs).toBeGreaterThan(Date.now());
+  });
 });
 
 describe("freebuff session pre-flight", () => {
@@ -301,11 +319,11 @@ describe("freebuff free-tier system marker", () => {
 
 describe("freebuff run registration", () => {
   it("maps freebuff models to their root free agent ids", () => {
-    expect(rootAgentIdForModel("deepseek/deepseek-v4-flash")).toBe("base2-free-deepseek-flash");
-    expect(rootAgentIdForModel("deepseek/deepseek-v4-pro")).toBe("base2-free-deepseek");
-    expect(rootAgentIdForModel("mimo/mimo-v2.5")).toBe("base2-free-mimo");
-    expect(rootAgentIdForModel("minimax/minimax-m3")).toBe("base2-free-minimax-m3");
-    expect(rootAgentIdForModel("openai/gpt-5.6-luna")).toBe("base2-free-luna");
+    expect(rootAgentIdForModel("deepseek/deepseek-v4-flash")).toBe("base3-free-deepseek-flash");
+    expect(rootAgentIdForModel("deepseek/deepseek-v4-pro")).toBe("base3-free-deepseek");
+    expect(rootAgentIdForModel("mimo/mimo-v2.5")).toBe("base3-free-mimo");
+    expect(rootAgentIdForModel("minimax/minimax-m3")).toBe("base3-free-minimax-m3");
+    expect(rootAgentIdForModel("openai/gpt-5.6-luna")).toBe("base3-free-luna");
     expect(rootAgentIdForModel("some/unknown-model")).toBe("base2-free");
   });
 
@@ -320,7 +338,7 @@ describe("freebuff run registration", () => {
     expect(opts.headers.Authorization).toBe("Bearer tok-1");
     const payload = JSON.parse(opts.body);
     expect(payload.action).toBe("START");
-    expect(payload.agentId).toBe("base2-free-deepseek-flash");
+    expect(payload.agentId).toBe("base3-free-deepseek-flash");
     expect(payload.ancestorRunIds).toEqual([]);
   });
 

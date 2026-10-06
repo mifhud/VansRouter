@@ -2,8 +2,13 @@
 // Sinh snapshot lần đầu (baseline) → sau refactor chạy lại phải khớp y hệt.
 // Mock proxyFetch + uuid-heavy executors KHÔNG cần ở đây vì chỉ gọi buildUrl/buildHeaders (pure).
 import { describe, it, expect } from "vitest";
+import { hostname } from "node:os";
+import { createRequire } from "node:module";
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 import { DefaultExecutor } from "../../open-sse/executors/default.js";
+
+const require = createRequire(import.meta.url);
+const APP_VERSION = require("../../package.json").version;
 
 // Credentials mẫu cố định (deterministic) — KHÔNG dùng Date.now/random.
 const API_KEY_CRED = { apiKey: "sk-test-APIKEY", providerSpecificData: {} };
@@ -20,20 +25,33 @@ const SPECIALIZED = new Set([
   "antigravity", "azure", "gemini-cli", "github", "iflow", "qoder", "kiro",
   "codex", "cursor", "vertex", "vertex-partner", "qwen", "opencode",
   "opencode-go", "grok-web", "perplexity-web", "ollama-local", "commandcode",
-  "xiaomi-tokenplan", "mimo-free",
+  "xiaomi-tokenplan", "mimo-free", "opencode-zen",
 ]);
 
 // Sanitize header: khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
 function sanitize(headers) {
   const out = {};
+  const dynamicValues = [process.version, hostname()].filter(Boolean);
   for (const [k, v] of Object.entries(headers)) {
     out[k] = typeof v === "string"
       ? v.replace(/Bearer .+/, "Bearer <TOK>")
           .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
           .replace(/kimi-\d{10,}/g, "kimi-<TS>")
+          // Version headers (X-Msh-Version et al) track package.json, so a release
+          // bump would otherwise churn every snapshot. Only the app's own version is
+          // masked: upstream CLI versions (claude-cli/2.1.280, grok-shell/1.0.44, ...)
+          // are pinned constants this golden set exists to guard, so a blanket
+          // \d+\.\d+\.\d+ strip would let a real regression through.
+          .replace(/^\d+\.\d+\.\d+$/, "<VER>")
+          .replace(new RegExp(`VansRouter/${escapeRegExp(APP_VERSION)}`, "g"), "VansRouter/<VER>")
+          .replace(new RegExp(dynamicValues.map(escapeRegExp).join("|"), "g"), "<ENV>")
       : v;
   }
   return out;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const providerIds = Object.keys(PROVIDERS).filter((p) => !SPECIALIZED.has(p)).sort();

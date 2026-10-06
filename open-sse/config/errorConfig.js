@@ -10,7 +10,9 @@ export const ERROR_TYPES = {
   500: { type: "server_error", code: "internal_server_error" },
   502: { type: "server_error", code: "bad_gateway" },
   503: { type: "server_error", code: "service_unavailable" },
-  504: { type: "server_error", code: "gateway_timeout" }
+  504: { type: "server_error", code: "gateway_timeout" },
+  520: { type: "server_error", code: "upstream_error" },
+  524: { type: "server_error", code: "upstream_timeout" },
 };
 
 // Default error messages per status code (client-facing)
@@ -25,7 +27,12 @@ export const DEFAULT_ERROR_MESSAGES = {
   500: "Internal server error",
   502: "Bad gateway - upstream provider error",
   503: "Service temporarily unavailable",
-  504: "Gateway timeout"
+  504: "Gateway timeout",
+  // Cloudflare edge codes: 520 = origin returned an unexpected response,
+  // 524 = origin timed out (no response within 100 s). Both mean the upstream
+  // provider is unreachable or overloaded; the client should retry later.
+  520: "Upstream provider returned an unexpected response",
+  524: "Upstream provider timed out — no response received",
 };
 
 // Exponential backoff config for rate limits
@@ -45,6 +52,9 @@ export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 const COOLDOWN = {
   long: 2 * 60 * 1000,
   short: 5 * 1000,
+  // Google wants a human to verify the account; it keeps 403ing until they do, so
+  // a short retry just burns a fallback slot. 24h = top of the plugin's ladder.
+  verification: 24 * 60 * 60 * 1000,
 };
 
 /**
@@ -58,11 +68,23 @@ const COOLDOWN = {
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
-  { text: "content-blocked",          shouldFallback: false },
-  { text: "content_blocked",          shouldFallback: false },
+  { text: "content-blocked",          shouldFallback: false, isContentFilter: true },
+  { text: "content_blocked",          shouldFallback: false, isContentFilter: true },
+  { text: "content exists risk",      shouldFallback: false, isContentFilter: true },
+  { text: "sensitive words detected", shouldFallback: false, isContentFilter: true },
+  { text: "sensitive content",        shouldFallback: false, isContentFilter: true },
+  { text: "unapproved channel",       shouldFallback: false, isContentFilter: true },
+  { text: "illegal api invocation",   shouldFallback: false, isContentFilter: true },
+  { provider: "codex", text: "model is not supported when using codex with a chatgpt account", cooldownMs: MAX_RATE_LIMIT_COOLDOWN_MS },
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
   { text: "improperly formed request", cooldownMs: COOLDOWN.long },
+  // Must sit above the generic 403 status rule below. Antigravity/Gemini
+  // Code Assist answer 403 with reason VALIDATION_REQUIRED and a
+  // validation_url for the account owner to visit; quota still reads healthy,
+  // so only the error body tells you the account is unusable.
+  { text: "validation_required",      cooldownMs: COOLDOWN.verification },
+  { text: "verify your account",      cooldownMs: COOLDOWN.verification },
   { text: "rate limit",               backoff: true },
   { text: "too many requests",        backoff: true },
   { text: "quota exceeded",           backoff: true },
@@ -74,6 +96,7 @@ export const ERROR_RULES = [
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },
   { status: 404, cooldownMs: COOLDOWN.long },
+  { status: 499, shouldFallback: false, cooldownMs: 0 },
   { status: 429, backoff: true },
 ];
 

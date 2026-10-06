@@ -1,4 +1,4 @@
-import { isValidApiKey, extractApiKey, isProviderAllowed, isComboAllowed } from "@/sse/services/auth.js";
+import { isValidApiKey, extractApiKey, isProviderAllowed, isComboAllowed, isKindAllowed } from "@/sse/services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { stripComboPrefix } from "open-sse/services/combo.js";
 import { buildModelsList } from "@/sse/services/allowedModels.js";
@@ -73,6 +73,7 @@ export async function GET(request) {
         }
       }
       data = data.filter((model) => {
+        if (!isKindAllowed(apiKeyInfo, model.kind || LLM_KIND)) return false;
         const isCombo = model.owned_by === "combo";
         const key = isCombo
           ? `combo:${stripComboPrefix(model.id)}`
@@ -93,5 +94,4 @@ export async function GET(request) {
     );
   }
 }
-
 

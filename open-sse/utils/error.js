@@ -28,12 +28,13 @@ export function buildErrorBody(statusCode, message) {
  * @param {string} message - Error message
  * @returns {Response} HTTP Response object
  */
-export function errorResponse(statusCode, message) {
+export function errorResponse(statusCode, message, extraHeaders = null) {
   return new Response(JSON.stringify(buildErrorBody(statusCode, message)), {
     status: statusCode,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      ...extraHeaders
     }
   });
 }
@@ -104,16 +105,18 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
- * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
+ * @param {boolean} [isPolicyError] - True for provider policy refusals (content filter); classifyError() reads this
+ * @param {Object} [extraHeaders] - Upstream headers to forward on the error Response
+ * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number, isPolicyError: boolean }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs, policyError = false) {
+export function createErrorResult(statusCode, message, resetsAtMs, isPolicyError = false, extraHeaders = null) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
-    policyError,
-    response: errorResponse(statusCode, message)
+    isPolicyError,
+    response: errorResponse(statusCode, message, extraHeaders)
   };
 }
 
@@ -125,7 +128,7 @@ export function createErrorResult(statusCode, message, resetsAtMs, policyError =
  * @param {string} retryAfterHuman - Human-readable retry info e.g. "reset after 30s"
  * @returns {Response}
  */
-export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
+export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, extraHeaders = null) {
   const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
   const msg = `${message} (${retryAfterHuman})`;
   return new Response(
@@ -133,8 +136,10 @@ export function unavailableResponse(statusCode, message, retryAfter, retryAfterH
     {
       status: statusCode,
       headers: {
+        ...extraHeaders,
         "Content-Type": "application/json",
-        "Retry-After": String(retryAfterSec)
+        // Intentionally mis-cased to prevent duplicate headers
+        "retry-after": String(retryAfterSec)
       }
     }
   );

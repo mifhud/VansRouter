@@ -38,29 +38,10 @@ export const THEME_CONFIG = {
   defaultTheme: "system", // "light" | "dark" | "system"
 };
 
-// Subscription
-export const SUBSCRIPTION_CONFIG = {
-  price: 1.0,
-  currency: "USD",
-  interval: "month",
-  planName: "Pro Plan",
-};
-
-// API endpoints
-export const API_ENDPOINTS = {
-  users: "/api/users",
-  providers: "/api/providers",
-  payments: "/api/payments",
-  auth: "/api/auth",
-};
-
 export const CONSOLE_LOG_CONFIG = {
   maxLines: 200,
   pollIntervalMs: 1000,
 };
-
-// Client-side store TTL: how long fetched data stays fresh before re-fetching
-export const CLIENT_STORE_TTL_MS = 60000;
 
 // Quota auto-ping: keep 5h windows warm by sending a tiny request right after reset.
 export const QUOTA_AUTOPING_CONFIG = {

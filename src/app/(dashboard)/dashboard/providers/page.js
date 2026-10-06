@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Card,
   CardSkeleton,
@@ -23,7 +23,6 @@ import Link from "next/link";
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
-import { fetchCached } from "@/shared/utils/fetchCache";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 import AddCompatibleModal from "./components/AddCompatibleModal";
 import { useCircuitBreakers } from "@/shared/hooks/useCircuitBreakers";
@@ -119,9 +118,11 @@ export default function ProvidersPage() {
     return () => unregisterSearch();
   }, [registerSearch, unregisterSearch]);
 
-  const matchSearch = (name) =>
-    !searchQuery.trim() ||
-    name.toLowerCase().includes(searchQuery.trim().toLowerCase());
+  const matchSearch = (name) => {
+    if (!searchQuery.trim()) return true;
+    if (!name) return false;
+    return name.toLowerCase().includes(searchQuery.trim().toLowerCase());
+  };
 
   const sortByPriority = (entries, authType) =>
     [...entries].sort(([ka, a], [kb, b]) => {
@@ -171,7 +172,7 @@ export default function ProvidersPage() {
     fetchData();
   }, []);
 
-  const getProviderStats = (providerId, authType) => {
+  const getProviderStats = useCallback((providerId, authType) => {
     const authTypes = Array.isArray(authType) ? authType : [authType];
     const providerConnections = connections.filter(
       (c) => c.provider === providerId && authTypes.includes(c.authType),
@@ -213,7 +214,7 @@ export default function ProvidersPage() {
       : null;
 
     return { connected, error, total, errorCode, errorTime, allDisabled };
-  };
+  }, [connections]);
 
   // Toggle all connections for a provider on/off. authType may be a single
   // string or an array (kiro counts oauth + api_key/apikey together).
@@ -261,80 +262,98 @@ export default function ProvidersPage() {
     }
   };
 
-  const compatibleProviders = providerNodes
-    .filter((node) => node.type === "openai-compatible")
-    .map((node) => ({
-      id: node.id,
-      name: node.name || "OpenAI Compatible",
-      color: "#10A37F",
-      textIcon: "OC",
-      apiType: node.apiType,
-    }))
-    .filter((p) => matchSearch(p.name));
+  const compatibleProviders = useMemo(() => {
+    return providerNodes
+      .filter((node) => node.type === "openai-compatible")
+      .map((node) => ({
+        id: node.id,
+        name: node.name || "OpenAI Compatible",
+        color: "#10A37F",
+        textIcon: "OC",
+        apiType: node.apiType,
+      }))
+      .filter((p) => matchSearch(p.name));
+  }, [providerNodes, matchSearch]);
 
-  const anthropicCompatibleProviders = providerNodes
-    .filter((node) => node.type === "anthropic-compatible")
-    .map((node) => ({
-      id: node.id,
-      name: node.name || "Anthropic Compatible",
-      color: "#D97757",
-      textIcon: "AC",
-    }))
-    .filter((p) => matchSearch(p.name));
+  const anthropicCompatibleProviders = useMemo(() => {
+    return providerNodes
+      .filter((node) => node.type === "anthropic-compatible")
+      .map((node) => ({
+        id: node.id,
+        name: node.name || "Anthropic Compatible",
+        color: "#D97757",
+        textIcon: "AC",
+      }))
+      .filter((p) => matchSearch(p.name));
+  }, [providerNodes, matchSearch]);
 
-  const oauthEntries = sortByPriority(
-    Object.entries(OAUTH_PROVIDERS).filter(([, info]) => !info.hidden && matchSearch(info.name)),
-    "oauth",
-  );
-  const freeEntries = Object.entries(FREE_PROVIDERS)
-    .filter(([, info]) => !info.hidden && matchSearch(info.name))
-    .sort(([, a], [, b]) => (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0));
+  const oauthEntries = useMemo(() => {
+    return sortByPriority(
+      Object.entries(OAUTH_PROVIDERS).filter(([, info]) => !info.hidden && matchSearch(info.name)),
+      "oauth",
+    );
+  }, [matchSearch]);
+
+  const freeEntries = useMemo(() => {
+    return Object.entries(FREE_PROVIDERS)
+      .filter(([, info]) => !info.hidden && matchSearch(info.name))
+      .sort(([, a], [, b]) => (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0));
+  }, [matchSearch]);
+
   // Free Tier cards may be OAuth-only (e.g. Kimchi) or dual-auth. Use the
   // registry auth modes instead of assuming every card is API-key-only.
-  const freeTierEntries = Object.entries(FREE_TIER_PROVIDERS)
-    .filter(
-      ([, info]) =>
-        !info.hidden &&
-        matchSearch(info.name) &&
-        (info.serviceKinds ?? ["llm"]).includes("llm"),
-    )
-    .sort(([ka, a], [kb, b]) => {
-      const pa = a.priority ?? 999;
-      const pb = b.priority ?? 999;
-      if (pa !== pb) return pa - pb;
-      const noAuthDiff = (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0);
-      if (noAuthDiff !== 0) return noAuthDiff;
-      const ca = getProviderStats(ka, getProviderAuthTypes(a, ka)).connected > 0 ? 0 : 1;
-      const cb = getProviderStats(kb, getProviderAuthTypes(b, kb)).connected > 0 ? 0 : 1;
-      if (ca !== cb) return ca - cb;
-      return (a.name || "").localeCompare(b.name || "");
-    });
+  const freeTierEntries = useMemo(() => {
+    return Object.entries(FREE_TIER_PROVIDERS)
+      .filter(
+        ([, info]) =>
+          !info.hidden &&
+          matchSearch(info.name) &&
+          (info.serviceKinds ?? ["llm"]).includes("llm"),
+      )
+      .sort(([ka, a], [kb, b]) => {
+        const pa = a.priority ?? 999;
+        const pb = b.priority ?? 999;
+        if (pa !== pb) return pa - pb;
+        const noAuthDiff = (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0);
+        if (noAuthDiff !== 0) return noAuthDiff;
+        const ca = getProviderStats(ka, getProviderAuthTypes(a, ka)).connected > 0 ? 0 : 1;
+        const cb = getProviderStats(kb, getProviderAuthTypes(b, kb)).connected > 0 ? 0 : 1;
+        if (ca !== cb) return ca - cb;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+  }, [matchSearch, getProviderStats]);
+
   // API Key: connected providers first, then alphabetical by name
-  const apikeyEntries = Object.entries(APIKEY_PROVIDERS)
-    .filter(
-      ([, info]) =>
-        !info.hidden &&
-        (info.serviceKinds ?? ["llm"]).includes("llm") &&
-        matchSearch(info.name),
-    )
-    .sort(([ka, a], [kb, b]) => {
-      const ca = getProviderStats(ka, "apikey").total > 0 ? 0 : 1;
-      const cb = getProviderStats(kb, "apikey").total > 0 ? 0 : 1;
-      if (ca !== cb) return ca - cb;
-      return (a.name || "").localeCompare(b.name || "");
-    });
-  const webCookieEntries = Object.entries(WEB_COOKIE_PROVIDERS)
-    .filter(
-      ([, info]) =>
-        !info.hidden &&
-        matchSearch(info.name),
-    )
-    .sort(([ka, a], [kb, b]) => {
-      const ca = getProviderStats(ka, "cookie").total > 0 ? 0 : 1;
-      const cb = getProviderStats(kb, "cookie").total > 0 ? 0 : 1;
-      if (ca !== cb) return ca - cb;
-      return (a.name || "").localeCompare(b.name || "");
-    });
+  const apikeyEntries = useMemo(() => {
+    return Object.entries(APIKEY_PROVIDERS)
+      .filter(
+        ([, info]) =>
+          !info.hidden &&
+          (info.serviceKinds ?? ["llm"]).includes("llm") &&
+          matchSearch(info.name),
+      )
+      .sort(([ka, a], [kb, b]) => {
+        const ca = getProviderStats(ka, "apikey").total > 0 ? 0 : 1;
+        const cb = getProviderStats(kb, "apikey").total > 0 ? 0 : 1;
+        if (ca !== cb) return ca - cb;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+  }, [matchSearch, getProviderStats]);
+
+  const webCookieEntries = useMemo(() => {
+    return Object.entries(WEB_COOKIE_PROVIDERS)
+      .filter(
+        ([, info]) =>
+          !info.hidden &&
+          matchSearch(info.name),
+      )
+      .sort(([ka, a], [kb, b]) => {
+        const ca = getProviderStats(ka, "cookie").total > 0 ? 0 : 1;
+        const cb = getProviderStats(kb, "cookie").total > 0 ? 0 : 1;
+        if (ca !== cb) return ca - cb;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+  }, [matchSearch, getProviderStats]);
   const isApikeySearching = !!searchQuery.trim();
   const visibleApikeyEntries =
     isApikeySearching || showAllApikey
@@ -391,7 +410,7 @@ export default function ProvidersPage() {
               variant="secondary"
               icon="add"
               onClick={() => setShowAddCompatibleModal(true)}
-              className="w-full !bg-white !text-black hover:!bg-gray-100 sm:w-auto"
+              className="w-full sm:w-auto"
             >
               Add OpenAI Compatible
             </Button>
@@ -720,7 +739,7 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle, circuit
                   <>
                     {getStatusDisplay(connected, error, errorCode)}
                     {circuitBreaker && (
-                      <CircuitBreakerBadge status={circuitBreaker} onReset={() => onResetCircuit(providerId)} />
+                      <CircuitBreakerBadge status={circuitBreaker} onReset={() => onResetCircuit(circuitBreaker?.name || providerId)} />
                     )}
                     {errorTime && (
                       <span className="text-text-muted">{errorTime}</span>

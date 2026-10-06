@@ -8,10 +8,11 @@
 
 import { describe, it, expect } from "vitest";
 import { openaiToKiroRequest } from "../../open-sse/translator/request/openai-to-kiro.js";
+import { KIRO_TOOL_RESULTS_PLACEHOLDER } from "../../open-sse/translator/concerns/kiroConversation.js";
 
 const contentOf = (result) =>
   result.conversationState.currentMessage.userInputMessage.content;
-const systemPromptOf = (result) => result.systemPrompt || "";
+const systemPromptOf = (result) => contentOf(result);
 
 describe("openaiToKiroRequest", () => {
   describe("basic message conversion", () => {
@@ -285,6 +286,45 @@ describe("openaiToKiroRequest", () => {
     });
   });
 
+  describe("tool-result-only turns", () => {
+    // A user turn that carries nothing but tool results still needs content for
+    // Kiro; the placeholder must not read like a new user instruction.
+
+    it("should use a neutral placeholder when the turn has only tool results", () => {
+      const body = {
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "get_weather",
+              description: "Get weather",
+              parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] }
+            }
+          }
+        ],
+        messages: [
+          { role: "user", content: "The secret word is PINEAPPLE. Weather in Jakarta?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"city":"Jakarta"}' } }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_1", content: "32C, humid" }
+        ]
+      };
+
+      const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
+      const current = result.conversationState.currentMessage.userInputMessage;
+
+      expect(current.content).toContain(KIRO_TOOL_RESULTS_PLACEHOLDER);
+      expect(current.content).not.toMatch(/\bcontinue\b/);
+      expect(current.userInputMessageContext.toolResults).toHaveLength(1);
+      expect(JSON.stringify(result.conversationState.history)).toContain("PINEAPPLE");
+    });
+  });
+
   describe("thinking budget", () => {
     it("maps reasoning_effort low to max_thinking_length 1024", () => {
       const body = {
@@ -507,7 +547,8 @@ describe("openaiToKiroRequest", () => {
       const result = openaiToKiroRequest("claude-sonnet-4.6", body, true, {});
 
       expect(systemPromptOf(result)).toContain("<max_thinking_length>32000</max_thinking_length>");
-      expect(result.additionalModelRequestFields?.output_config?.effort).toBe("high");
+      // Kiro 4.6 rejects xhigh but accepts max (7894f3d3); only xhigh clamps to high.
+      expect(result.additionalModelRequestFields?.output_config?.effort).toBe("max");
     });
 
     it("clamps OpenAI Responses reasoning.effort xhigh to max_thinking_length 32000", () => {
@@ -557,8 +598,8 @@ describe("openaiToKiroRequest", () => {
         {}
       );
 
-      expect(first.systemPrompt).toBe(second.systemPrompt);
-      expect(first.systemPrompt).not.toContain("Current time");
+      expect(first).not.toHaveProperty("systemPrompt");
+      expect(second).not.toHaveProperty("systemPrompt");
       expect(first.conversationState.currentMessage.userInputMessage.content).toContain("Current time");
     });
 

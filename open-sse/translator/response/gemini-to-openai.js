@@ -6,6 +6,7 @@ import { toOpenAIUsage } from "../concerns/usage.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
 import { encodeDataUri } from "../concerns/image.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
+import { storeGeminiThoughtSignature } from "../../services/thoughtSignatureStore.js";
 
 // Build chunk meta for current gemini state
 function chunkMeta(state) {
@@ -13,14 +14,18 @@ function chunkMeta(state) {
 }
 
 // Build a tool_call chunk from a gemini functionCall part (shared by sig/non-sig branches)
-function emitFunctionCall(functionCall, state) {
+function emitFunctionCall(functionCall, state, signature = null) {
   const rawName = functionCall.name;
   // Restore original tool name from mapping (AG cloaking)
   const fcName = state.toolNameMap?.get(rawName) || rawName;
   const fcArgs = functionCall.args || {};
   const toolCallIndex = state.functionIndex++;
+  const callId = functionCall.id || `${fcName}-${Date.now()}-${toolCallIndex}`;
+  if (signature) {
+    storeGeminiThoughtSignature(callId, signature, state.sessionId, state.model);
+  }
   const toolCall = {
-    id: `${fcName}-${Date.now()}-${toolCallIndex}`,
+    id: callId,
     index: toolCallIndex,
     type: OPENAI_BLOCK.FUNCTION,
     function: { name: fcName, arguments: JSON.stringify(fcArgs) },
@@ -47,7 +52,7 @@ export function geminiToOpenAIResponse(chunk, state) {
   // Initialize state
   if (!state.messageId) {
     state.messageId = response.responseId || `msg_${Date.now()}`;
-    state.model = response.modelVersion || "gemini";
+    state.model = response.modelVersion || state.model || "gemini";
     state.functionIndex = 0;
     state.geminiToolCallCount = 0;
     results.push(buildChunk(chunkMeta(state), { role: ROLE.ASSISTANT }, null));
@@ -57,6 +62,9 @@ export function geminiToOpenAIResponse(chunk, state) {
   if (content?.parts) {
     for (const part of content.parts) {
       const hasThoughtSig = part.thoughtSignature || part.thought_signature;
+      if (hasThoughtSig && typeof hasThoughtSig === "string") {
+        state.pendingThoughtSignature = hasThoughtSig;
+      }
       const isThought = part.thought === true;
       
       // Handle thought signature (thinking mode)
@@ -64,16 +72,23 @@ export function geminiToOpenAIResponse(chunk, state) {
         const hasTextContent = part.text !== undefined && part.text !== "";
         const hasFunctionCall = !!part.functionCall;
         
+        // Standalone thoughtSignature part (no text, no functionCall): keep pending for next functionCall
+        if (!hasTextContent && !hasFunctionCall) {
+          continue;
+        }
+
         if (hasTextContent) {
           results.push(buildChunk(
             chunkMeta(state),
             isThought ? reasoningDelta(part.text) : { content: part.text },
             null
           ));
+          if (!isThought) state.hasEmittedContent = true;
         }
         
         if (hasFunctionCall) {
-          results.push(emitFunctionCall(part.functionCall, state));
+          results.push(emitFunctionCall(part.functionCall, state, hasThoughtSig));
+          state.pendingThoughtSignature = null;
         }
         continue;
       }
@@ -88,16 +103,20 @@ export function geminiToOpenAIResponse(chunk, state) {
           isThought ? reasoningDelta(part.text) : { content: part.text },
           null
         ));
+        if (!isThought) state.hasEmittedContent = true;
       }
 
       // Function call
       if (part.functionCall) {
-        results.push(emitFunctionCall(part.functionCall, state));
+        const sig = state.pendingThoughtSignature || null;
+        results.push(emitFunctionCall(part.functionCall, state, sig));
+        state.pendingThoughtSignature = null;
       }
 
       // Inline data (images)
       const inlineData = part.inlineData || part.inline_data;
       if (inlineData?.data) {
+        state.hasEmittedContent = true;
         const mimeType = inlineData.mimeType || inlineData.mime_type || DEFAULT_IMAGE_MIME;
         results.push(buildChunk(
           chunkMeta(state),
@@ -144,6 +163,15 @@ export function geminiToOpenAIResponse(chunk, state) {
     let finishReason = toOpenAIFinish(candidate.finishReason, "gemini");
     if (finishReason === OPENAI_FINISH.STOP && state.geminiToolCallCount > 0) {
       finishReason = OPENAI_FINISH.TOOL_CALLS;
+    }
+
+    // If stream is closing without any text content or tool calls emitted,
+    // (even if reasoning/thinking was emitted), emit a synthetic whitespace/text chunk.
+    // Modern AI SDKs (e.g. Vercel AI SDK in Kilo) reject responses with APIEmptyResponseError
+    // when a stream finishes with ONLY thinking tokens and zero text/tool content.
+    if (!state.hasEmittedContent && state.geminiToolCallCount === 0) {
+      results.push(buildChunk(chunkMeta(state), { content: "\n" }, null));
+      state.hasEmittedContent = true;
     }
     
     const finalChunk = buildChunk(chunkMeta(state), {}, finishReason);

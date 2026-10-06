@@ -5,6 +5,7 @@
 
 // Ensure outbound fetch respects HTTP(S)_PROXY/ALL_PROXY in Node runtime
 import "open-sse/index.js";
+import { GROK_CLI_BASE_URL, GROK_CLI_VERSION as GROK_CLI_CLIENT_VERSION } from "open-sse/config/grokCli.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -48,6 +49,7 @@ import {
   CLINEPASS_CONFIG,
   GITLAB_CONFIG,
   CODEBUDDY_CONFIG,
+  CODEBUDDY_INTL_CONFIG,
   ZAI_CONFIG,
   GROK_CLI_CONFIG,
   FREEBUFF_CONFIG,
@@ -65,11 +67,16 @@ import kiro from "./providers/kiro.js";
 import antigravity from "./providers/antigravity.js";
 import kimchi from "./providers/kimchi.js";
 import freebuff from "./providers/freebuff.js";
+import glm from "./providers/glm.js";
 
 export { extractCodexAccountInfo, fetchKiroProfileArn };
 
 // Inlined from services/xai.js to keep web route bundle free of `open` (CLI-only) package
 let cachedXaiDiscovery = null;
+
+export function _resetXaiDiscoveryCache() {
+  cachedXaiDiscovery = null;
+}
 
 async function discoverXaiEndpoints() {
   if (cachedXaiDiscovery) return cachedXaiDiscovery;
@@ -300,7 +307,7 @@ const PROVIDERS = {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
-          "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+          "User-Agent": `grok-pager/${GROK_CLI_CLIENT_VERSION} grok-shell/${GROK_CLI_CLIENT_VERSION} (linux; x86_64)`,
         },
         body,
       });
@@ -318,7 +325,7 @@ const PROVIDERS = {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
-          "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+          "User-Agent": `grok-pager/${GROK_CLI_CLIENT_VERSION} grok-shell/${GROK_CLI_CLIENT_VERSION} (linux; x86_64)`,
         },
         body: new URLSearchParams({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -347,13 +354,13 @@ const PROVIDERS = {
     postExchange: async (tokens) => {
       // Best-effort user profile from cli-chat-proxy (non-fatal)
       try {
-        const res = await fetch("https://cli-chat-proxy.grok.com/v1/user", {
+        const res = await fetch(`${GROK_CLI_BASE_URL}/user`, {
           headers: {
             Authorization: `Bearer ${tokens.access_token}`,
             Accept: "application/json",
-            "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+            "User-Agent": `grok-pager/${GROK_CLI_CLIENT_VERSION} grok-shell/${GROK_CLI_CLIENT_VERSION} (linux; x86_64)`,
             "x-xai-token-auth": "xai-grok-cli",
-            "x-grok-client-version": "0.2.93",
+            "x-grok-client-version": GROK_CLI_CLIENT_VERSION,
           },
         });
         if (res.ok) return { user: await res.json() };
@@ -1235,6 +1242,76 @@ const PROVIDERS = {
     }),
   },
 
+  "codebuddy-intl": {
+    config: CODEBUDDY_INTL_CONFIG,
+    flowType: "device_code",
+    requestDeviceCode: async (config) => {
+      const response = await fetch(`${config.stateUrl}?platform=${config.platform}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": config.userAgent,
+          "X-Requested-With": "XMLHttpRequest",
+          "X-Domain": "www.codebuddy.ai",
+          "X-No-Authorization": "true",
+          "X-No-User-Id": "true",
+          "X-Product": "SaaS",
+        },
+        body: "{}",
+      });
+      if (!response.ok) throw new Error(`CodeBuddy state request failed: ${await response.text()}`);
+      const data = await response.json();
+      if (data.code !== 0 || !data.data?.state || !data.data?.authUrl) {
+        throw new Error(`CodeBuddy state error: ${data.msg || "missing state/authUrl"}`);
+      }
+      return {
+        device_code: data.data.state,
+        verification_uri: data.data.authUrl,
+        user_code: "",
+        interval: config.pollInterval / 1000,
+        _isCodeBuddy: true,
+      };
+    },
+    pollToken: async (config, deviceCode) => {
+      const response = await fetch(`${config.tokenUrl}?state=${encodeURIComponent(deviceCode)}`, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "User-Agent": config.userAgent,
+          "X-Requested-With": "XMLHttpRequest",
+          "X-Domain": "www.codebuddy.ai",
+          "X-No-Authorization": "true",
+          "X-No-User-Id": "true",
+          "X-No-Enterprise-Id": "true",
+          "X-No-Department-Info": "true",
+          "X-Product": "SaaS",
+        },
+      });
+      if (!response.ok) return { ok: false, data: { error: "request_failed" } };
+      const data = await response.json();
+      if (data.code === 0 && data.data?.accessToken) {
+        return {
+          ok: true,
+          data: {
+            access_token: data.data.accessToken,
+            refresh_token: data.data.refreshToken || "",
+            token_type: data.data.tokenType || "Bearer",
+            expires_in: data.data.expiresIn,
+          },
+        };
+      }
+      if (data.code === 11217) return { ok: true, data: { error: "authorization_pending" } };
+      return { ok: false, data: { error: data.msg || "unknown_error" } };
+    },
+    mapTokens: (tokens) => ({
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresIn: tokens.expires_in || 86400,
+      providerSpecificData: {},
+    }),
+  },
+
   // Zcode: Z.ai OAuth via zcode.z.ai proxy + business token exchange for /api/anthropic.
   // Manual paste flow only (zcode:// custom scheme — browser shows ERR_UNKNOWN_URL_SCHEME,
   // user copies URL from address bar). Client: zcode://zai-auth/callback (ZCode source v3.1.0).
@@ -1413,6 +1490,7 @@ const PROVIDERS = {
   },
 
   kimchi,
+  glm,
 };
 
 /**

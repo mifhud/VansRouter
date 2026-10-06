@@ -3,109 +3,50 @@
 // native-passthrough flows. Used by caveman.js and ponytail.js.
 
 import { FORMATS } from "../translator/formats.js";
-
-const SEP = "\n\n";
+import {
+  injectChatSystem,
+  injectClaudeSystem,
+  injectGeminiSystem,
+  injectInstructionsSystem,
+  injectKiroSystem,
+  injectResponsesInputSystem,
+} from "./formatInjectors.js";
 
 export function injectSystemPrompt(body, format, prompt) {
-  if (!body || !prompt) return;
-
-  switch (format) {
-    case FORMATS.CLAUDE:
-      injectClaudeSystem(body, prompt);
-      return;
-    case FORMATS.GEMINI:
-    case FORMATS.GEMINI_CLI:
-    case FORMATS.VERTEX:
-    case FORMATS.ANTIGRAVITY:
-      // Antigravity wraps Gemini shape in body.request → injectGeminiSystem handles it
-      injectGeminiSystem(body, prompt);
-      return;
-    case FORMATS.KIRO:
+  try {
+    if (!body || !prompt || typeof body !== "object") return;
+    if (isKiroBody(body) || format === FORMATS.KIRO) {
       injectKiroSystem(body, prompt);
       return;
-    default:
-      // OpenAI and OpenAI-shaped formats (responses/codex/cursor/ollama)
-      injectMessagesSystem(body, prompt);
-  }
-}
-
-// OpenAI-shaped: messages[] (chat) or input[] (responses) or instructions (responses string)
-// Kiro shape: top-level systemPrompt. Keep the provider's native field separate
-// from conversationState so injection survives translation without rewriting messages.
-function injectKiroSystem(body, prompt) {
-  if (typeof body.systemPrompt === "string" && body.systemPrompt.trim()) {
-    body.systemPrompt = `${body.systemPrompt}${SEP}${prompt}`;
-  } else {
-    body.systemPrompt = prompt;
-  }
-}
-
-function injectMessagesSystem(body, prompt) {
-  // OpenAI Responses API: top-level string field
-  if (typeof body.instructions === "string") {
-    body.instructions = body.instructions
-      ? `${body.instructions}${SEP}${prompt}`
-      : prompt;
-    return;
-  }
-
-  const arr = Array.isArray(body.messages) ? body.messages
-    : Array.isArray(body.input) ? body.input
-    : null;
-  if (!arr) return;
-
-  const idx = arr.findIndex(m => m && (m.role === "system" || m.role === "developer"));
-  if (idx >= 0) {
-    appendToOpenAIMessage(arr[idx], prompt);
-  } else {
-    arr.unshift({ role: "system", content: prompt });
-  }
-}
-
-function appendToOpenAIMessage(msg, prompt) {
-  if (typeof msg.content === "string") {
-    msg.content = `${msg.content}${SEP}${prompt}`;
-  } else if (Array.isArray(msg.content)) {
-    // Responses-style array of parts {type:"input_text"|"text", text}
-    msg.content.push({ type: "input_text", text: prompt });
-  } else {
-    msg.content = prompt;
-  }
-}
-
-// Claude shape: body.system as string | array of {type:"text", text}
-// Insert before the last cache_control block to keep injection inside the cached prefix.
-function injectClaudeSystem(body, prompt) {
-  if (typeof body.system === "string" && body.system.length > 0) {
-    body.system = `${body.system}${SEP}${prompt}`;
-    return;
-  }
-  if (Array.isArray(body.system)) {
-    const block = { type: "text", text: prompt };
-    let lastCacheIdx = -1;
-    for (let i = body.system.length - 1; i >= 0; i--) {
-      if (body.system[i]?.cache_control) { lastCacheIdx = i; break; }
     }
-    if (lastCacheIdx >= 0) {
-      body.system.splice(lastCacheIdx, 0, block);
-    } else {
-      body.system.push(block);
+    if (format === FORMATS.CLAUDE) {
+      injectClaudeSystem(body, prompt);
+      return;
     }
-    return;
+    if (format === FORMATS.GEMINI || format === FORMATS.GEMINI_CLI
+      || format === FORMATS.VERTEX || format === FORMATS.ANTIGRAVITY) {
+      injectGeminiSystem(body, prompt);
+      return;
+    }
+    if (typeof body.instructions === "string") {
+      injectInstructionsSystem(body, prompt);
+      return;
+    }
+    if (Array.isArray(body.messages)) {
+      injectChatSystem(body, prompt);
+      return;
+    }
+    if (Array.isArray(body.input)) injectResponsesInputSystem(body, prompt);
+  } catch (_) {
+    // fail-open
   }
-  body.system = prompt;
 }
 
-// Gemini shape: body.system_instruction | body.systemInstruction | body.request.systemInstruction
-// Each shape: { parts: [{ text }] }
-function injectGeminiSystem(body, prompt) {
-  const target = body.request && typeof body.request === "object" ? body.request : body;
-  const useSnake = Object.prototype.hasOwnProperty.call(target, "system_instruction");
-  const key = useSnake ? "system_instruction" : "systemInstruction";
-  const sys = target[key];
-  if (sys && Array.isArray(sys.parts)) {
-    sys.parts.push({ text: prompt });
-    return;
-  }
-  target[key] = { parts: [{ text: prompt }] };
+function isKiroBody(body) {
+  if (!body || typeof body !== "object") return false;
+  const cs = body.conversationState;
+  if (!cs || typeof cs !== "object") return false;
+  const historyTurn = Array.isArray(cs.history)
+    && cs.history.some(item => item && (item.userInputMessage || item.assistantResponseMessage));
+  return historyTurn || !!(cs.currentMessage && cs.currentMessage.userInputMessage);
 }

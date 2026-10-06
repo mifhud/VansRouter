@@ -10,6 +10,28 @@ const OPTIONAL_FIELDS = [
   "consecutiveUseCount", "idToken", "lastRefreshAt",
 ];
 
+const MODEL_LOCK_PREFIX = "modelLock_";
+
+function resetHealthStateOnActivation(existing, patch) {
+  if (patch?.testStatus !== "active") return patch;
+
+  const normalized = {
+    ...patch,
+    testStatus: "active",
+    lastError: Object.hasOwn(patch, "lastError") ? patch.lastError : null,
+    lastErrorAt: Object.hasOwn(patch, "lastErrorAt") ? patch.lastErrorAt : null,
+    errorCode: null,
+    rateLimitedUntil: null,
+    backoffLevel: 0,
+  };
+
+  for (const key of Object.keys(existing || {})) {
+    if (key.startsWith(MODEL_LOCK_PREFIX)) normalized[key] = null;
+  }
+
+  return normalized;
+}
+
 function rowToConn(row) {
   if (!row) return null;
   const extra = parseJson(row.data, {});
@@ -86,7 +108,15 @@ export async function getProviderConnectionById(id) {
   return rowToConn(row);
 }
 
-// Internal sync reorder — must be called INSIDE a transaction
+// Internal sync reorder — must be called INSIDE a transaction.
+//
+// Normalizes priorities to a contiguous 1..N after a DELETE or an explicit
+// reorder, so gaps don't accumulate over time.
+//
+// Deliberately NOT called on insert: a new connection already gets
+// MAX(priority)+1, which sorts after every existing row, so the order is
+// identical with or without the rewrite. Skipping it there is what makes
+// import O(1) per key instead of O(pool) — see createProviderConnection.
 function reorderInTx(db, providerId) {
   const list = db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [providerId]).map(rowToConn);
   list.sort((a, b) => {
@@ -95,7 +125,10 @@ function reorderInTx(db, providerId) {
     return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
   });
   list.forEach((c, i) => {
-    db.run(`UPDATE providerConnections SET priority = ? WHERE id = ?`, [i + 1, c.id]);
+    const want = i + 1;
+    if ((c.priority || 0) !== want) {
+      db.run(`UPDATE providerConnections SET priority = ? WHERE id = ?`, [want, c.id]);
+    }
   });
 }
 
@@ -105,10 +138,30 @@ export async function createProviderConnection(data) {
   let result;
 
   db.transaction(() => {
-    const all = db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [data.provider]).map(rowToConn);
+    // apikey connections are deduped by name and need only the current max
+    // priority, so query for those directly instead of loading the whole pool
+    // (O(pool) per key — the other half of the import cost in #4311). The oauth
+    // branch below still scans, because its identity rules compare fields
+    // inside providerSpecificData and have no single-column equivalent.
+    const isApikey = data.authType === "apikey" && !!data.name;
+    const all = isApikey
+      ? db.all(
+          `SELECT * FROM providerConnections WHERE provider = ? AND authType = ? AND name = ?`,
+          [data.provider, "apikey", data.name]
+        ).map(rowToConn)
+      : db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [data.provider]).map(rowToConn);
+    const poolSize = isApikey
+      ? db.get(`SELECT COUNT(*) AS n FROM providerConnections WHERE provider = ?`, [data.provider])?.n ?? all.length
+      : all.length;
 
     let existing = null;
-    if (data.authType === "oauth" && data.email) {
+    // Dedup precedence: cursor oauth rows key on machineId (stable even when
+    // profile-email extraction fails); other oauth rows key on email;
+    // apikey rows key on name.
+    // access_token: never dedup — user manages duplicates manually
+    if (data.provider === "cursor" && data.authType === "oauth" && data.providerSpecificData?.machineId) {
+      existing = all.find(c => c.provider === "cursor" && c.providerSpecificData?.machineId === data.providerSpecificData.machineId);
+    } else if (data.authType === "oauth" && data.email) {
       const incomingUsername = data.providerSpecificData?.username;
       const incomingWs = data.providerSpecificData?.chatgptAccountId;
       existing = all.find(c => {
@@ -144,10 +197,17 @@ export async function createProviderConnection(data) {
     } else if (data.authType === "apikey" && data.name) {
       existing = all.find(c => c.authType === "apikey" && c.name === data.name);
     }
-    // access_token: never dedup — user manages duplicates manually
 
     if (existing) {
-      const merged = { ...existing, ...data, updatedAt: now };
+      // Name collision on an apikey connection upserts — it replaces the stored
+      // apiKey. Upstream 239bcfc5 turned this into a PROVIDER_NAME_CONFLICT
+      // error, but this fork keeps the upsert deliberately:
+      // src/shared/utils/bulkAdd.js documents it as the contract its planner is
+      // built around (collision-free names so the backend inserts, plus a note
+      // that a manual exact-name collision "will still hit the backend
+      // upsert"). Refusing here would break that. #4311
+      const normalized = resetHealthStateOnActivation(existing, data);
+      const merged = { ...existing, ...normalized, updatedAt: now };
       upsert(db, merged);
       result = merged;
       return;
@@ -155,11 +215,15 @@ export async function createProviderConnection(data) {
 
     let connectionName = data.name || null;
     if (!connectionName && (data.authType === "oauth" || data.authType === "access_token")) {
-      connectionName = deriveConnectionName(data, data.email || `Account ${all.length + 1}`);
+      connectionName = deriveConnectionName(data, data.email || `Account ${poolSize + 1}`);
     }
     let connectionPriority = data.priority;
     if (!connectionPriority) {
-      connectionPriority = all.reduce((m, c) => Math.max(m, c.priority || 0), 0) + 1;
+      // MAX(priority)+1 in SQL rather than a reduce over the loaded pool: the
+      // apikey path no longer has the whole pool in memory, and the aggregate
+      // is served by the index instead of a row scan. #4311
+      const maxRow = db.get(`SELECT MAX(priority) AS m FROM providerConnections WHERE provider = ?`, [data.provider]);
+      connectionPriority = (maxRow?.m || 0) + 1;
     }
 
     const conn = {
@@ -181,11 +245,57 @@ export async function createProviderConnection(data) {
     if (data.email !== undefined) conn.email = data.email;
 
     upsert(db, conn);
-    reorderInTx(db, data.provider);
+    // reorderInTx is O(pool), so it is skipped on the MAX(priority)+1 path: the
+    // row is already last, which is the order reindexing would have produced.
+    // Callers that pass an explicit priority can collide with existing rows —
+    // the dashboard sends priority 1 (src/app/api/providers/route.js:203,
+    // AddApiKeyModal.js:28), which left the whole pool on priority 1 and flipped
+    // the display order — so that path still reindexes. #4311
+    if (data.priority) reorderInTx(db, data.provider);
     result = conn;
   });
 
   return result;
+}
+
+export async function createProviderConnectionsBulk(items) {
+  if (!Array.isArray(items) || items.length === 0 || items.length > 500) {
+    throw new Error("Bulk connection batch must contain 1-500 items");
+  }
+  const db = await getAdapter();
+  const results = [];
+  db.transaction(() => {
+    for (const data of items) {
+      if (!data?.provider || !data?.apiKey || !data?.name) {
+        results.push({ name: data?.name || null, ok: false, error: "provider, apiKey, and name are required" });
+        continue;
+      }
+      const existing = db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [data.provider])
+        .map(rowToConn)
+        .find((connection) => connection.authType === "apikey" && connection.name === data.name);
+      const now = new Date().toISOString();
+      const connection = existing
+        ? {
+            ...existing,
+            ...data,
+            providerSpecificData: data.providerSpecificData === undefined
+              ? existing.providerSpecificData
+              : data.providerSpecificData,
+            authType: "apikey",
+            updatedAt: now,
+          }
+        : {
+            id: randomUUID(), provider: data.provider, authType: "apikey", name: data.name,
+            priority: data.priority || 1, isActive: true, createdAt: now, updatedAt: now,
+            apiKey: data.apiKey, testStatus: data.testStatus || "unknown",
+            providerSpecificData: data.providerSpecificData,
+          };
+      upsert(db, connection);
+      results.push({ name: data.name, ok: true, id: connection.id, updated: !!existing });
+    }
+    for (const provider of new Set(items.map((item) => item.provider))) reorderInTx(db, provider);
+  });
+  return results;
 }
 
 // Critical: OAuth refresh token race — atomic merge inside transaction
@@ -196,7 +306,8 @@ export async function updateProviderConnection(id, data) {
     const row = db.get(`SELECT * FROM providerConnections WHERE id = ?`, [id]);
     if (!row) { result = null; return; }
     const existing = rowToConn(row);
-    const merged = { ...existing, ...data, updatedAt: new Date().toISOString() };
+    const normalized = resetHealthStateOnActivation(existing, data);
+    const merged = { ...existing, ...normalized, updatedAt: new Date().toISOString() };
     upsert(db, merged);
     if (data.priority !== undefined) reorderInTx(db, existing.provider);
     result = merged;

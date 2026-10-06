@@ -8,8 +8,14 @@ export const MITM_TOOLS = {
     description: "Google Antigravity IDE with MITM",
     configType: "mitm",
     mitmDomain: "daily-cloudcode-pa.googleapis.com",
-    modelAliases: ["gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low", "gemini-3.5-flash-low", "gemini-3-flash-agent", "gemini-3.5-flash-extra-low", "gemini-3.1-pro-low", "gemini-pro-agent", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", "gemini-3-flash"],
+    modelAliases: ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "gemini-3.7-flash-preview", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low", "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low", "gemini-3.5-flash-low", "gemini-3-flash-agent", "gemini-3.5-flash-extra-low", "gemini-3.1-pro-low", "gemini-pro-agent", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", "gemini-3-flash"],
     defaultModels: [
+      { id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", alias: "gemini-3.8-flash-high" },
+      { id: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)", alias: "gemini-3.8-flash-medium" },
+      { id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", alias: "gemini-3.8-flash-low" },
+      { id: "gemini-3.7-flash-high", name: "Gemini 3.7 Flash (High)", alias: "gemini-3.7-flash-high" },
+      { id: "gemini-3.7-flash-medium", name: "Gemini 3.7 Flash (Medium)", alias: "gemini-3.7-flash-medium" },
+      { id: "gemini-3.7-flash-low", name: "Gemini 3.7 Flash (Low)", alias: "gemini-3.7-flash-low" },
       { id: "gemini-3.6-flash-high", name: "Gemini 3.6 Flash (High)", alias: "gemini-3.6-flash-high" },
       { id: "gemini-3.6-flash-medium", name: "Gemini 3.6 Flash (Medium)", alias: "gemini-3.6-flash-medium" },
       { id: "gemini-3.6-flash-low", name: "Gemini 3.6 Flash (Low)", alias: "gemini-3.6-flash-low" },
@@ -153,6 +159,22 @@ export const CLI_TOOLS = {
     color: "#8B5CF6",
     description: "Nous Research self-improving AI agent",
     configType: "custom",
+    // Model slots Hermes supports besides the default ("model:" block).
+    // "default" is not listed — the card renders it as the main model picker.
+    roles: [
+      { id: "delegation", label: "Delegation (subagents)" },
+      { id: "vision", label: "Vision" },
+      { id: "web_extract", label: "Web Extract" },
+      { id: "compression", label: "Compression" },
+      { id: "title_generation", label: "Title Generation" },
+      { id: "approval", label: "Approval" },
+      { id: "skills_hub", label: "Skills Hub" },
+      { id: "mcp", label: "MCP" },
+      { id: "memory_query_rewrite", label: "Memory Query Rewrite" },
+      { id: "background_review", label: "Background Review" },
+      { id: "curator", label: "Curator" },
+      { id: "monitor", label: "Monitor" },
+    ],
   },
   droid: {
     id: "droid",
@@ -364,7 +386,7 @@ amp --model "{{model}}"
       { id: "claude-opus-4-7", name: "Claude Opus 4.7", alias: "opus", defaultValue: "cc/claude-opus-4-7" },
       { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", alias: "sonnet", defaultValue: "cc/claude-sonnet-4-6" },
       { id: "gpt-5.5", name: "GPT 5.5", alias: "gpt5", defaultValue: "cx/gpt-5.5" },
-      { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", alias: "gemini", defaultValue: "gemini/gemini-3.1-pro" },
+      { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", alias: "gemini", defaultValue: "gemini/gemini-3.1-pro-preview" },
     ],
   },
   "grok-build": {
@@ -416,6 +438,96 @@ devin auth login
 # Verify detection (optional)
 devin --version`,
     },
+  },
+  pi: {
+    id: "pi",
+    name: "Pi (pi-coding-agent)",
+    image: "/providers/pi.svg",
+    color: "#6366F1",
+    description: "Pi coding agent — minimal, extensible agent harness (pi.dev)",
+    configType: "custom",
+    docsUrl: "https://pi.dev",
+    notes: [
+      {
+        type: "info",
+        text: "Pi uses ~/.pi/agent/models.json. 9Router is configured under providers.9router as an OpenAI-compatible endpoint.",
+      },
+    ],
+  },
+  omp: {
+    id: "omp",
+    name: "Oh My Pi",
+    image: "/providers/omp.png",
+    color: "#EC4899",
+    description: "Oh My Pi terminal AI agent with auto-discovery support",
+    configType: "custom",
+    docsUrl: "https://github.com/can1357/oh-my-pi",
+    notes: [
+      {
+        type: "info",
+        text: "Oh My Pi uses ~/.omp/agent/models.yml and agent.db. 9Router is configured with proxy discovery so all models appear automatically under /model.",
+      },
+    ],
+  },
+  crush: {
+    id: "crush",
+    name: "Crush",
+    image: "/providers/crush.png",
+    color: "#FB923C",
+    description: "Charm Crush terminal AI coding agent",
+    configType: "custom",
+    docsUrl: "https://github.com/charmbracelet/crush",
+    notes: [
+      {
+        type: "info",
+        text: "Crush uses ~/.config/crush/crush.json. 9Router registers as an openai-compat provider.",
+      },
+    ],
+  },
+  forge: {
+    id: "forge",
+    name: "ForgeCode",
+    image: "/providers/forge.png",
+    color: "#EAB308",
+    description: "Antinomy HQ ForgeCode agent harness",
+    configType: "custom",
+    docsUrl: "https://github.com/antinomyhq/forge",
+    notes: [
+      {
+        type: "info",
+        text: "ForgeCode uses ~/.forge/config.toml. 9Router updates the [openai] section with your baseUrl, apiKey, and model.",
+      },
+    ],
+  },
+  smelt: {
+    id: "smelt",
+    name: "Smelt",
+    image: "/providers/smelt.svg",
+    color: "#EF4444",
+    description: "Smelt terminal AI coding assistant",
+    configType: "custom",
+    docsUrl: "https://github.com/leonardcser/smelt",
+    notes: [
+      {
+        type: "info",
+        text: "Smelt uses ~/.smelt/config.json for OpenAI-compatible endpoint configuration.",
+      },
+    ],
+  },
+  codewhale: {
+    id: "codewhale",
+    name: "CodeWhale",
+    image: "/providers/codewhale.svg",
+    color: "#4F46E5",
+    description: "CodeWhale terminal coding agent (successor to DeepSeek TUI)",
+    configType: "custom",
+    docsUrl: "https://github.com/Hmbown/CodeWhale",
+    notes: [
+      {
+        type: "info",
+        text: "CodeWhale uses ~/.codewhale/config.toml. 9Router configures the [openai] provider with your base_url, api_key, and model.",
+      },
+    ],
   },
   // HIDDEN: gemini-cli
   // "gemini-cli": {

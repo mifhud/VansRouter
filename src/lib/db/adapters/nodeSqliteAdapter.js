@@ -38,15 +38,24 @@ export async function createNodeSqliteAdapter(filePath) {
   }, CHECKPOINT_INTERVAL_MS);
   if (typeof checkpointTimer.unref === "function") checkpointTimer.unref();
 
+  const onShutdown = () => gracefulClose();
+  const onSigint = () => { onShutdown(); process.exit(0); };
+  const onSigterm = () => { onShutdown(); process.exit(0); };
+  let closed = false;
   function gracefulClose() {
+    if (closed) return;
+    closed = true;
+    process.removeListener("beforeExit", onShutdown);
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
     try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
     try { stmtCache.clear(); } catch {}
     try { db.close(); } catch {}
   }
-  const onShutdown = () => gracefulClose();
+
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
 
   return {
     driver: "node:sqlite",

@@ -1,25 +1,30 @@
 import crypto from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
-import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, AG_DEFAULT_TOOLS, AG_TOOL_SUFFIX } from "../config/appConstants.js";
+import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, ANTIGRAVITY_PROMPT_REWRITES } from "../config/appConstants.js";
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
-import { resolveSessionId } from "../utils/sessionManager.js";
+import { resolveSessionId, toNumericSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { scrubProxyAndFingerprintHeaders } from "../services/antigravityHeaderScrub.js";
-import { cleanJSONSchemaForAntigravity } from "../translator/formats/gemini.js";
+import { cleanJSONSchemaForAntigravity, normalizeGeminiContents } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
+import { getGeminiThoughtSignatureSync } from "../services/thoughtSignatureStore.js";
+import { resolveAntigravityUpstreamModel } from "../config/providerModels.js";
+import { fitToolName } from "../translator/concerns/toolCall.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
   if (!name) return "_unknown";
   let s = name.replace(/[^a-zA-Z0-9_.:\-]/g, "_");
   if (!/^[a-zA-Z_]/.test(s)) s = "_" + s;
-  return s.substring(0, 64);
+  return fitToolName(s, 64);
 }
 
 const MAX_RETRY_AFTER_MS = 10000;
 const ANTIGRAVITY_TRANSIENT_RETRY_MAX_MS = 15000;
 const MAX_ANTIGRAVITY_OUTPUT_TOKENS = 16384;
+const COMPETITIVE_CLAUDE_AGENT_PROMPT = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+const AG_PROMPT_TRIGGERS = [COMPETITIVE_CLAUDE_AGENT_PROMPT, "Hermes Agent", "Nous Research"];
 const ANTIGRAVITY_IDE_REQUEST_ID_RE = /^agent\/[^/]+\/\d+\/[^/]+\/\d+$/;
 
 const ANTIGRAVITY_TRANSIENT_ERROR_PATTERNS = [
@@ -148,6 +153,7 @@ export class AntigravityExecutor extends BaseExecutor {
 
   transformRequest(model, body, stream, credentials) {
     const projectId = credentials?.projectId || this.generateProjectId();
+    const upstreamModel = resolveAntigravityUpstreamModel(model);
 
     // OpenAI clients may include stream_options even for non-streaming calls.
     // Google generateContent rejects that combination before processing the request.
@@ -200,9 +206,12 @@ export class AntigravityExecutor extends BaseExecutor {
       };
     }
 
+    const rawSessionId = body.request?.sessionId || resolveSessionId({ headers: credentials?.rawHeaders, body, connectionId: credentials?.email || credentials?.connectionId, scope: "antigravity" });
+    const sessionId = toNumericSessionId(rawSessionId) || rawSessionId;
+
     // ─── Standard (non-image) request ───
     // Fix contents for Claude models via Antigravity
-    const contents = body.request?.contents?.map(c => {
+    const rawContents = (body.request?.contents || []).map(c => {
       let role = c.role;
       // functionResponse must be role "user" for Claude models
       if (c.parts?.some(p => p.functionResponse)) {
@@ -215,21 +224,28 @@ export class AntigravityExecutor extends BaseExecutor {
         return true;
       });
       // Gemini 3+ rejects functionCall parts without thoughtSignature. Clients (Claude Code, IDE)
-      // don't persist thoughtSignature in their history, so backfill the default signature on any
-      // functionCall part that arrives without one.
-      const needsBackfill = parts?.some(p => p.functionCall && !p.thoughtSignature) ?? false;
-      if (role !== c.role || parts?.length !== c.parts?.length || needsBackfill) {
-        return {
-          ...c, role,
-          parts: needsBackfill
-            ? parts.map(p => (p.functionCall && !p.thoughtSignature)
-                ? { ...p, thoughtSignature: DEFAULT_THINKING_AG_SIGNATURE }
-                : p)
-            : parts,
-        };
+      // don't persist thoughtSignature in their history, so backfill from cache or default signature.
+      // In parallel function calls, only the first call needs a signature; siblings stay unsigned.
+      let firstFunctionCallSeen = false;
+      const modifiedParts = parts?.map(p => {
+        if (!p.functionCall) return p;
+        const callId = p.functionCall.id;
+        const cachedSig = callId ? getGeminiThoughtSignatureSync(callId, sessionId, body.model || model) : null;
+        const callSig = p.thoughtSignature || cachedSig || (!firstFunctionCallSeen ? DEFAULT_THINKING_AG_SIGNATURE : undefined);
+        firstFunctionCallSeen = true;
+        if (callSig) {
+          return { ...p, thoughtSignature: callSig };
+        }
+        return p;
+      });
+
+      const partsChanged = parts?.length !== c.parts?.length || modifiedParts?.some((p, idx) => p !== parts[idx]);
+      if (role !== c.role || partsChanged) {
+        return { ...c, role, parts: modifiedParts || parts };
       }
       return c;
     }).filter(c => Array.isArray(c.parts) && c.parts.length > 0); // ponytail: v1internal rejects empty parts[] (issue #6)
+    const contents = normalizeGeminiContents(rawContents);
 
     // Sanitize tool schemas and function names before sending to Antigravity.
     let tools = body.request?.tools;
@@ -274,6 +290,23 @@ export class AntigravityExecutor extends BaseExecutor {
       }
     }
     stripBlacklisted(requestWithoutTools);
+
+    // Rewrite competing-client branding in system prompts (e.g. Zed's Claude prompt,
+    // OpenCode naming) so Antigravity doesn't flag the request with a 429 Quota Exhausted.
+    if (Array.isArray(requestWithoutTools.systemInstruction?.parts)) {
+      requestWithoutTools.systemInstruction = {
+        ...requestWithoutTools.systemInstruction,
+        parts: requestWithoutTools.systemInstruction.parts.map((part) => {
+          if (typeof part?.text !== "string") return part;
+          let text = part.text;
+          for (const { from, to } of ANTIGRAVITY_PROMPT_REWRITES) {
+            text = text.replaceAll(from, to);
+          }
+          text = AG_PROMPT_TRIGGERS.reduce((t, trigger) => t.split(trigger).join(""), text);
+          return { ...part, text };
+        }),
+      };
+    }
     // Model-aware thinkingConfig strip — keep for Gemini, drop for Claude/gpt-oss/tab_.
     if (shouldStripCloudCodeThinking("antigravity", model)) {
       stripCloudCodeThinkingConfig(requestWithoutTools);
@@ -288,7 +321,7 @@ export class AntigravityExecutor extends BaseExecutor {
       generationConfig,
       ...(contents && { contents }),
       ...(tools && { tools }),
-      sessionId: sourceRequest?.sessionId || resolveSessionId({ headers: credentials?.rawHeaders, body, connectionId: credentials?.email || credentials?.connectionId, scope: "antigravity" }),
+      sessionId,
       safetySettings: undefined,
       ...(tools?.length > 0 && { toolConfig: { functionCallingConfig: { mode: "VALIDATED" } } })
     };
@@ -320,12 +353,16 @@ export class AntigravityExecutor extends BaseExecutor {
 
     this._lastSessionId = transformedRequest.sessionId; // cached for buildHeaders (base.execute order)
 
+    // The agent (chat) path must NOT carry `requestType`: Google then buckets the
+    // request and returns a detail-free 429 RESOURCE_EXHAUSTED even with quota left.
+    // Also drops the field when it leaks in via the ...body spread below.
+    delete body.requestType;
+
     return {
       ...body,
       project: projectId,
-      model: model,
+      model: upstreamModel,
       userAgent: "antigravity",
-      requestType: "agent",
       requestId: buildIdeRequestId({ body, request: transformedRequest, credentials, model, requestType: "agent" }),
       request: transformedRequest
     };
@@ -465,215 +502,6 @@ export class AntigravityExecutor extends BaseExecutor {
     return Math.min(1000 * (2 ** attempt), cap); // exponential backoff
   }
 
-  /**
-   * Cloak tools before sending to Antigravity provider (anti-ban):
-   * - Rename client tools with _ide suffix
-   * - Inject AG default decoy tools after client tools
-   * Returns { cloakedBody, toolNameMap } where toolNameMap maps suffixed → original
-   */
-  static cloakTools(body, clientTool = null) {
-    const tools = body.request?.tools;
-    if (!tools || tools.length === 0) {
-      return { cloakedBody: body, toolNameMap: null };
-    }
-
-    const isCopilot = clientTool === "github-copilot";
-    const toolNameMap = new Map();
-    const clientDeclarations = [];
-    const decoyNames = new Set(AG_DECOY_TOOLS.map(tool => tool.name));
-
-    // First: collect renamed client tools
-    for (const toolGroup of tools) {
-      if (!toolGroup.functionDeclarations) continue;
-
-      for (const func of toolGroup.functionDeclarations) {
-        // For GitHub Copilot, avoid emitting duplicate native Antigravity tool names.
-        // Keep the decoys only once in the final declaration list.
-        if (isCopilot && AG_DEFAULT_TOOLS.has(func.name)) {
-          continue;
-        }
-
-        // Skip if already covered by decoys for Copilot
-        if (isCopilot && decoyNames.has(func.name)) {
-          continue;
-        }
-
-        // Preserve native AG names for non-Copilot clients
-        if (AG_DEFAULT_TOOLS.has(func.name)) {
-          clientDeclarations.push(func);
-          continue;
-        }
-
-        const suffixed = `${func.name}${AG_TOOL_SUFFIX}`;
-        toolNameMap.set(suffixed, func.name);
-        clientDeclarations.push({ ...func, name: suffixed });
-      }
-    }
-
-    // Client tools first, then AG decoy tools
-    const allDeclarations = [];
-    const seenNames = new Set();
-    for (const decl of [...clientDeclarations, ...AG_DECOY_TOOLS]) {
-      if (!decl?.name || seenNames.has(decl.name)) continue;
-      seenNames.add(decl.name);
-      allDeclarations.push(decl);
-    }
-
-    // Rename tool names in conversation history (contents)
-    const cloakedContents = body.request?.contents?.map(msg => {
-      if (!msg.parts) return msg;
-      
-      const cloakedParts = msg.parts.map(part => {
-        // Rename functionCall.name
-        if (part.functionCall && !AG_DEFAULT_TOOLS.has(part.functionCall.name)) {
-          return {
-            ...part,
-            functionCall: {
-              ...part.functionCall,
-              name: `${part.functionCall.name}${AG_TOOL_SUFFIX}`
-            }
-          };
-        }
-        
-        // Rename functionResponse.name
-        if (part.functionResponse && !AG_DEFAULT_TOOLS.has(part.functionResponse.name)) {
-          return {
-            ...part,
-            functionResponse: {
-              ...part.functionResponse,
-              name: `${part.functionResponse.name}${AG_TOOL_SUFFIX}`
-            }
-          };
-        }
-        
-        return part;
-      });
-      
-      return { ...msg, parts: cloakedParts };
-    });
-
-    // Single functionDeclarations group: client tools first, then decoys
-    return {
-      cloakedBody: {
-        ...body,
-        request: {
-          ...body.request,
-          tools: [{ functionDeclarations: allDeclarations }],
-          contents: cloakedContents || body.request.contents
-        }
-      },
-      toolNameMap
-    };
-  }
 }
-
-// AG decoy tools — same names as AG native defaults, redirect to _ide suffixed tools
-const AG_DECOY_TOOLS = [
-  {
-    name: "browser_subagent",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "command_status",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "find_by_name",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "generate_image",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "grep_search",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "list_dir",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "list_resources",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "mcp_sequential-thinking_sequentialthinking",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "multi_replace_file_content",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "notify_user",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "read_resource",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "read_terminal",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "read_url_content",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "replace_file_content",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "run_command",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "search_web",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "send_command_input",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "task_boundary",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "view_content_chunk",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "view_file",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  },
-  {
-    name: "write_to_file",
-    description: "This tool is currently unavailable.",
-    parameters: { type: "OBJECT", properties: {}, required: [] }
-  }
-];
 
 export default AntigravityExecutor;

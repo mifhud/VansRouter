@@ -53,7 +53,6 @@ const PROVIDER_FORMAT = {
 };
 
 // cursor/commandcode are OpenAI-shaped (messages[]) and DO get injected via default handler.
-// Kiro uses its native top-level systemPrompt field.
 const NO_SYSTEM_SURFACE = new Set();
 
 // A long, compressible git-diff tool output (>500 bytes → above MIN_COMPRESS_SIZE)
@@ -76,7 +75,6 @@ function buildBodyForFormat(format, { withToolResult = false } = {}) {
       };
     case FORMATS.KIRO:
       return {
-        systemPrompt: "Base system.",
         conversationState: {
           currentMessage: {
             userInputMessage: {
@@ -133,7 +131,12 @@ function readSystemText(body, format) {
         ? body.system
         : Array.isArray(body.system) ? body.system.map((b) => b.text).join("\n") : "";
     case FORMATS.KIRO:
-      return body.systemPrompt || "";
+      return [
+        ...(body.conversationState?.history || []),
+        body.conversationState?.currentMessage,
+      ]
+        .map((item) => item?.userInputMessage?.content || "")
+        .join("\n");
     case FORMATS.OPENAI_RESPONSES:
       return body.instructions || "";
     case FORMATS.GEMINI:

@@ -90,6 +90,50 @@ export function reorderByCapabilities(models, required) {
     .map((x) => x.m);
 }
 
+// Aggregate the capabilities of a combo's targets. Features a request may need
+// are unioned (any target can serve them), `tools` is intersected (every target
+// in the chain must accept them), reasoning fields follow the primary target,
+// and the limits are the safe extremes: smallest window, largest output.
+// Members that name another combo resolve through comboLookup (name → models).
+// Seats are written with UI aliases (e.g. `ocg/...`); resolveCaps maps those to
+// the real provider id so per-provider capability overrides still apply.
+export function aggregateComboCapabilities(comboModels, comboLookup = null, resolveCaps = null, _depth = 0) {
+  const members = Array.isArray(comboModels) ? comboModels.filter((id) => typeof id === "string") : [];
+  if (members.length === 0 || _depth > 6) return null;
+
+  const allCaps = members.map((fullId) => {
+    const name = stripComboPrefix(fullId);
+    if (comboLookup?.[name]) {
+      return aggregateComboCapabilities(comboLookup[name], comboLookup, resolveCaps, _depth + 1)
+        ?? resolveCaps?.(name)
+        ?? getCapabilitiesForModel(null, name);
+    }
+    const slash = fullId.indexOf("/");
+    const local = getCapabilitiesForModel(slash > 0 ? fullId.slice(0, slash) : null, fullId.slice(slash + 1));
+    const override = resolveCaps?.(fullId);
+    return override ? { ...local, ...override } : local;
+  });
+
+  const primary = allCaps[0];
+  const any = (key) => allCaps.some((c) => c[key] === true);
+  return {
+    vision: any("vision"),
+    pdf: any("pdf"),
+    audioInput: any("audioInput"),
+    videoInput: any("videoInput"),
+    imageOutput: any("imageOutput"),
+    audioOutput: any("audioOutput"),
+    search: any("search"),
+    tools: allCaps.every((c) => c.tools === true),
+    reasoning: primary.reasoning,
+    thinkingFormat: primary.thinkingFormat,
+    thinkingCanDisable: primary.thinkingCanDisable,
+    thinkingRange: primary.thinkingRange,
+    contextWindow: Math.min(...allCaps.map((c) => c.contextWindow)),
+    maxOutput: Math.max(...allCaps.map((c) => c.maxOutput)),
+  };
+}
+
 /**
  * Track rotation state per combo (for round-robin strategy)
  * @type {Map<string, { index: number, consecutiveUseCount: number }>}
@@ -129,9 +173,29 @@ export function detectRequiredCapabilities(body) {
   const scanContent = (content) => {
     if (Array.isArray(content)) for (const b of content) scanBlock(b);
   };
+  const scanMessage = (m) => {
+    if (!m || typeof m !== "object") return;
+    if (Array.isArray(m.images) && m.images.length) required.add("vision");
+    const attachments = m.experimental_attachments || m.attachments;
+    if (Array.isArray(attachments)) for (const a of attachments) {
+      const mime = a?.contentType || a?.mediaType || (typeof a?.url === "string" ? a.url.match(/^data:([^;,]+)/)?.[1] : null);
+      if (mime?.startsWith("image/")) required.add("vision");
+      else if (mime?.startsWith("audio/")) required.add("audioInput");
+      else if (mime === "application/pdf") required.add("pdf");
+      else if (a?.url || a?.data) required.add("vision");
+    }
+    if (m.image_url || m.image) required.add("vision");
+    if (m.audio_url || m.audio) required.add("audioInput");
+    scanContent(m.content);
+    if (typeof m.content === "string") {
+      if (m.content.includes("data:image/")) required.add("vision");
+      if (m.content.includes("data:audio/")) required.add("audioInput");
+      if (m.content.includes("data:application/pdf")) required.add("pdf");
+    }
+  };
 
   // Modalities: current user turn only (trailing user run across each known shape).
-  for (const m of trailingUserItems(body.messages)) scanContent(m.content);      // openai / claude
+  for (const m of trailingUserItems(body.messages)) scanMessage(m);              // openai / claude / Hermes
   for (const it of trailingUserItems(body.input)) scanContent(it.content);       // responses
   const contents = body.contents || body.request?.contents;                      // gemini / antigravity
   for (const c of trailingUserItems(contents)) scanContent(c.parts);
@@ -611,7 +675,7 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   log.info("FUSION", `Combo "${comboName}" | panel=${panel.length} [${panel.join(", ")}] | judge=${judge} | quorum=${minPanel}`);
 
   // 1. Fan out to the panel in parallel: non-streaming, tools stripped (we want prose).
-  const { tools, tool_choice, ...rest } = body;
+  const { tools, tool_choice, stream_options, ...rest } = body;
   const panelBody = { ...rest, stream: false };
 
   // Flatten tool turns to prose so panel models keep context without emitting tool_calls.

@@ -26,23 +26,31 @@ export function createBetterSqliteAdapter(filePath) {
   }, CHECKPOINT_INTERVAL_MS);
   if (typeof checkpointTimer.unref === "function") checkpointTimer.unref();
 
+  // Ensure WAL is flushed and -wal/-shm files removed on shutdown
+  const onShutdown = () => gracefulClose();
+  const onSigint = () => { onShutdown(); process.exit(0); };
+  const onSigterm = () => { onShutdown(); process.exit(0); };
+  let closed = false;
   function gracefulClose() {
+    if (closed) return;
+    closed = true;
+    process.removeListener("beforeExit", onShutdown);
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
     try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
     try { stmtCache.clear(); } catch {}
     try { db.close(); } catch {}
   }
 
-  // Ensure WAL is flushed and -wal/-shm files removed on shutdown
-  const onShutdown = () => gracefulClose();
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
 
   return {
     driver: "better-sqlite3",
-    run(sql, params = []) { return prepare(sql).run(params); },
-    get(sql, params = []) { return prepare(sql).get(params); },
-    all(sql, params = []) { return prepare(sql).all(params); },
+    run(sql, params = []) { return prepare(sql).run(...params); },
+    get(sql, params = []) { return prepare(sql).get(...params); },
+    all(sql, params = []) { return prepare(sql).all(...params); },
     exec(sql) { return db.exec(sql); },
     transaction(fn) { return db.transaction(fn)(); },
     checkpoint() { try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {} },

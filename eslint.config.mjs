@@ -70,6 +70,9 @@ const eslintConfig = defineConfig([
     "cli/app/.next/**",
     "cli/app/.next-cli-build/**",
     "cli/app/src/mitm/server.js",
+    // Agent worktrees are independent copies, not project source.
+    ".kilo/**",
+    ".kilocode/**",
   ]),
 ]);
 

@@ -27,11 +27,24 @@ export function isMultiModelProvider(provider) {
   return MULTI_MODEL_PROVIDERS.has(provider);
 }
 
+export function isCodexUnavailable401(connection, quotaEntry, error) {
+  if (connection?.provider !== "codex") return false;
+  const msg = typeof quotaEntry?.message === "string" ? quotaEntry.message : "";
+  const err = typeof error === "string" ? error : "";
+  return (
+    msg.includes("Usage API temporarily unavailable (401)") ||
+    msg.includes("temporarily unavailable (401)") ||
+    (msg.includes("Codex connected") && msg.includes("401")) ||
+    err.includes("temporarily unavailable (401)") ||
+    err.includes("HTTP 401")
+  );
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 export const QUOTA_CACHE_KEY = "quotaCacheData";
 export const REFRESH_INTERVAL_MS = 60000;
 // Claude usage/quota endpoint rate-limits; poll it less often than other providers
-export const CLAUDE_REFRESH_INTERVAL_MS = 180000;
+export const CLAUDE_REFRESH_INTERVAL_MS = 600000;
 export const DEPLETED_QUOTA_THRESHOLD = 5;
 export const AUTO_REFRESH_STORAGE_KEY = "quotaAutoRefresh";
 export const CONNECTIONS_PAGE_SIZE = 20;
@@ -63,6 +76,16 @@ export function getConnectionQuotaRemaining(connection, quotaData) {
   return Number.POSITIVE_INFINITY;
 }
 
+function groupByProviderStable(connections) {
+  const groups = new Map();
+  for (const connection of connections) {
+    const provider = connection.provider || "";
+    if (!groups.has(provider)) groups.set(provider, []);
+    groups.get(provider).push(connection);
+  }
+  return Array.from(groups.values()).flat();
+}
+
 export function sortVisibleConnections(
   connections,
   quotaData,
@@ -85,7 +108,7 @@ export function sortVisibleConnections(
     });
   }
 
-  if (!expiringFirst) return connections;
+  if (!expiringFirst) return groupByProviderStable(connections);
 
   const getEarliestResetTime = (connection) => {
     const resetTimes = (quotaData[connection.id]?.quotas || [])
@@ -374,8 +397,17 @@ export function parseQuotaData(provider, data) {
       case "codex":
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([quotaType, quota]) => {
+            let displayName = quotaType;
+            if (quotaType === "spark_session") displayName = "Spark (5h)";
+            else if (quotaType === "spark_weekly") displayName = "Spark (Weekly)";
+            else if (quotaType === "session") displayName = "5h";
+            else if (quotaType === "weekly") displayName = "Weekly";
+            else if (quotaType === "review_session") displayName = "Review (5h)";
+            else if (quotaType === "review_weekly") displayName = "Review (Weekly)";
+
             normalizedQuotas.push({
-              name: quotaType,
+              name: displayName,
+              quotaType,
               used: quota.used || 0,
               total: quota.total || 0,
               remaining: quota.remaining,
@@ -464,7 +496,8 @@ export function parseQuotaData(provider, data) {
         break;
 
       case "codebuddy-cn":
-        // CodeBuddy CN mixes recurring refill packs ("Monthly"/"Weekly"/...)
+      case "codebuddy-intl":
+        // CodeBuddy CN/Intl mix recurring refill packs ("Monthly"/"Weekly"/...)
         // with one-shot bonus packs ("Bonus Pack N"). Forward `recurring`
         // so the UI can show "Expires in" for bonus packs (whose resetAt is
         // a hard expiry, not a refresh) instead of "Reset in".
@@ -483,6 +516,8 @@ export function parseQuotaData(provider, data) {
 
       case "kimi":
       case "deepseek":
+        // DeepSeek balances are prepaid credit, not a usage quota: forward the
+        // currency so the table renders the balance instead of a percentage.
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([name, quota]) => {
             normalizedQuotas.push({
@@ -491,6 +526,9 @@ export function parseQuotaData(provider, data) {
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
               remainingPercentage: quota.remainingPercentage,
+              ...(provider.toLowerCase() === "deepseek"
+                ? { isCreditBalance: quota.isCreditBalance === true, currency: quota.currency || "USD" }
+                : {}),
             });
           });
         }
@@ -523,6 +561,22 @@ export function parseQuotaData(provider, data) {
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
               remainingPercentage: quota.remainingPercentage,
+            });
+          });
+        }
+        break;
+
+      case "zed":
+        // Edit predictions + optional hosted model_requests; unlimited uses remainingPercentage.
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              remainingPercentage: quota.remainingPercentage,
+              unlimited: quota.unlimited,
             });
           });
         }

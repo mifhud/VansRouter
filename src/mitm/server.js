@@ -7,11 +7,12 @@ const dns = require("dns");
 const { promisify } = require("util");
 const { execSync } = require("child_process");
 const { log, err, dumpRequest, createResponseDumper, clearDumpDir } = require("./logger");
-const { IS_DEV, LSOF_BIN, TARGET_HOSTS, URL_PATTERNS, MODEL_SYNONYMS, MODEL_PATTERNS, MODEL_NO_MAP, getToolForHost } = require("./config");
+const { IS_DEV, LSOF_BIN, TARGET_HOSTS, URL_PATTERNS, MODEL_SYNONYMS, MODEL_PATTERNS, MODEL_NO_MAP, getToolForHost, isChatRequest } = require("./config");
 const { DATA_DIR, MITM_DIR } = require("./paths");
 const { getCertForDomain } = require("./cert/generate");
 const { getMitmAlias } = require("./dbReader");
 const { applyAntigravityIdeVersionOverride } = require("./antigravityIdeVersion");
+const { scrubSchemaKeywords } = require("./scrubSchemaKeywords.cjs");
 const LOCAL_PORT = 443;
 const IS_WIN = process.platform === "win32";
 const ENABLE_FILE_LOG = IS_DEV;
@@ -95,10 +96,10 @@ function collectBodyRaw(req) {
 function extractModel(url, body) {
   const urlMatch = url.match(/\/models\/([^/:]+)/);
   if (urlMatch) return urlMatch[1];
-  
+
   // Skip parsing if body is binary (AWS EventStream, Protocol Buffers, etc.)
   if (isBinaryData(body)) return null;
-  
+
   try {
     const parsed = JSON.parse(body.toString());
     if (parsed.conversationState) {
@@ -165,7 +166,11 @@ async function passthrough(req, res, bodyBuffer, onResponse) {
   const versionOverride = tool === "antigravity"
     ? applyAntigravityIdeVersionOverride(bodyBuffer, req.headers)
     : { bodyBuffer, headers: req.headers };
-  const bodyForForwarding = versionOverride.bodyBuffer;
+  // Antigravity passthrough bodies skip the translator, so the same unsupported schema
+  // keywords (e.g. "optional") must be scrubbed here or Google 400s the request.
+  const bodyForForwarding = tool === "antigravity"
+    ? scrubSchemaKeywords(versionOverride.bodyBuffer)
+    : versionOverride.bodyBuffer;
   const headersForForwarding = { ...versionOverride.headers, host: targetHost };
   if (bodyForForwarding !== bodyBuffer) {
     headersForForwarding["content-length"] = String(bodyForForwarding.length);
@@ -342,9 +347,7 @@ const server = https.createServer(sslOptions, async (req, res) => {
     const tool = getToolForHost(req.headers.host);
     if (!tool) return passthrough(req, res, bodyBuffer);
 
-    const patterns = URL_PATTERNS[tool] || [];
-    const isChat = patterns.some(p => req.url.includes(p));
-    if (!isChat) return passthrough(req, res, bodyBuffer);
+    if (!isChatRequest(tool, req)) return passthrough(req, res, bodyBuffer);
 
     // Cursor uses binary proto — model extraction not possible at this layer.
     // Delegate directly to handler which decodes proto internally.

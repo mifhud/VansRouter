@@ -1,6 +1,31 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import fs from "fs";
 import path from "path";
+import { maskSensitiveHeaders } from "../../open-sse/utils/requestLogger.js";
+
+describe("request logger header masking", () => {
+  it("redacts credentials while preserving safe headers", () => {
+    const masked = maskSensitiveHeaders({
+      Authorization: "Bearer secret-token",
+      "x-api-key": "secret-key",
+      Cookie: "session=secret",
+      "content-type": "application/json",
+    });
+
+    expect(masked).toEqual({
+      Authorization: "[REDACTED]",
+      "x-api-key": "[REDACTED]",
+      Cookie: "[REDACTED]",
+      "content-type": "application/json",
+    });
+  });
+
+  it("masks Headers instances", () => {
+    expect(maskSensitiveHeaders(new Headers({ Authorization: "Bearer secret" }))).toEqual({
+      authorization: "[REDACTED]",
+    });
+  });
+});
 
 // ============================================================
 // AUDIT-002 (#1962): API key masking in usage stats

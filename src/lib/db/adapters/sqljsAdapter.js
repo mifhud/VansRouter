@@ -99,17 +99,24 @@ export async function createSqlJsAdapter(filePath) {
     }
   }
 
+  let closed = false;
+  const flush = () => { if (!closed && dirty) try { persist(); } catch {} };
+  const onSigint = () => { flush(); process.exit(0); };
+  const onSigterm = () => { flush(); process.exit(0); };
+  process.once("beforeExit", flush);
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+
   function close() {
+    if (closed) return;
     if (saveTimer) clearTimeout(saveTimer);
+    process.removeListener("beforeExit", flush);
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
     if (dirty) persist();
+    closed = true;
     db.close();
   }
-
-  // Flush on shutdown
-  const flush = () => { if (dirty) try { persist(); } catch {} };
-  process.on("beforeExit", flush);
-  process.on("SIGINT", flush);
-  process.on("SIGTERM", flush);
 
   return { driver: "sql.js", run, get, all, exec, transaction, close, raw: db };
 }

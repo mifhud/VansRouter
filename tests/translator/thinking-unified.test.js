@@ -52,6 +52,18 @@ describe("extractThinking", () => {
   it("no intent → null", () => {
     expect(extractThinking({ messages: [] })).toBeNull();
   });
+  it("reasoning_effort wins over thinking:{type:enabled} (no budget)", () => {
+    expect(extractThinking({
+      thinking: { type: "enabled" },
+      reasoning_effort: "high",
+    })).toEqual({ mode: "level", level: "high" });
+  });
+  it("reasoning.effort wins over thinking:{type:enabled} (no budget)", () => {
+    expect(extractThinking({
+      thinking: { type: "enabled" },
+      reasoning: { effort: "medium" },
+    })).toEqual({ mode: "level", level: "medium" });
+  });
 });
 
 describe("applyThinking per provider format", () => {
@@ -108,6 +120,27 @@ describe("applyThinking per provider format", () => {
     expect(out.enable_thinking).toBe(false);
     expect(out.thinking).toBeUndefined();
   });
+  it.each([
+    ["high", "high"],
+    ["max", "max"],
+    ["xhigh", "max"],
+    ["low", "low"],
+    ["medium", "high"],
+    ["minimal", "low"],
+  ])("GLM-5.3 %s → reasoning_effort=%s (low|high|max only, per z.ai docs)", (input, expected) => {
+    const out = apply("openai", "glm-5.3", { reasoning_effort: input }, "glm-cn");
+    expect(out.thinking).toEqual({ type: "enabled" });
+    expect(out.reasoning_effort).toBe(expected);
+  });
+  it("GLM-5.2 also gets reasoning_effort (supported from 5.2 onward)", () => {
+    const out = apply("openai", "glm-5.2", { reasoning_effort: "low" }, "glm-cn");
+    expect(out.reasoning_effort).toBe("low");
+  });
+  it("GLM-4.7 (pre-5.2) does not get reasoning_effort — z.ai ignores it", () => {
+    const out = apply("openai", "glm-4.7", { reasoning_effort: "low" }, "glm-cn");
+    expect(out.thinking).toEqual({ type: "enabled" });
+    expect(out.reasoning_effort).toBeUndefined();
+  });
   it("Qwen on → enable_thinking + thinking_budget", () => {
     const out = apply("openai", "qwen3-max", { reasoning_effort: "medium" }, "qwen");
     expect(out.enable_thinking).toBe(true);
@@ -161,6 +194,36 @@ describe("applyThinking per provider format", () => {
   it("openai keeps xhigh for reasoning models", () => {
     const out = apply("openai", "gpt-5.3-codex", { reasoning_effort: "xhigh" }, "codex");
     expect(out.reasoning_effort).toBe("xhigh");
+  });
+  it("commandcode envelope writes params.reasoning_effort, not wrapper fields", () => {
+    const out = apply("commandcode", "deepseek/deepseek-v4.1-flash", {
+      params: { model: "deepseek/deepseek-v4.1-flash", messages: [] },
+      reasoning_effort: "high",
+    }, "commandcode");
+    expect(out.params.reasoning_effort).toBe("high");
+    expect(out.reasoning_effort).toBeUndefined();
+    expect(out.thinking).toBeUndefined();
+  });
+  it("commandcode preserves low effort instead of remapping to high", () => {
+    const out = apply("commandcode", "deepseek/deepseek-v4.1-flash", {
+      params: { messages: [] },
+      reasoning_effort: "low",
+    }, "commandcode");
+    expect(out.params.reasoning_effort).toBe("low");
+  });
+  it("commandcode preserves max effort", () => {
+    const out = apply("commandcode", "deepseek/deepseek-v4.1-flash", {
+      params: { messages: [] },
+      reasoning_effort: "max",
+    }, "commandcode");
+    expect(out.params.reasoning_effort).toBe("max");
+  });
+  it("commandcode none clears the envelope effort", () => {
+    const out = apply("commandcode", "deepseek/deepseek-v4.1-flash", {
+      params: { messages: [], reasoning_effort: "high" },
+      reasoning_effort: "none",
+    }, "commandcode");
+    expect(out.params.reasoning_effort).toBeUndefined();
   });
 });
 

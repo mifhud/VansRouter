@@ -6,7 +6,10 @@ export function getClineAccessToken(token) {
   if (typeof token !== "string") return "";
   const trimmed = token.trim();
   if (!trimmed) return "";
-  return trimmed.startsWith("workos:") ? trimmed : `workos:${trimmed}`;
+  if (trimmed.toLowerCase().startsWith("workos:")) return trimmed;
+  return /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(trimmed)
+    ? `workos:${trimmed}`
+    : trimmed;
 }
 
 export function getClineAuthorizationHeader(token) {

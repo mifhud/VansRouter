@@ -14,7 +14,8 @@ async function ensureNodeModules() {
   try {
     fs = await import("fs");
     path = await import("path");
-    LOGS_DIR = path.join(typeof process !== "undefined" && process.cwd ? process.cwd() : ".", "logs");
+    const { getRuntimeLogsDir } = await import("./runtimePaths.js");
+    LOGS_DIR = getRuntimeLogsDir();
   } catch {
     // Running in non-Node environment (Worker, Browser, etc.)
   }
@@ -70,25 +71,16 @@ function writeJsonFile(sessionPath, filename, data) {
   }
 }
 
-// Mask sensitive data in headers (DISABLED - keep full token for testing)
-function maskSensitiveHeaders(headers) {
+export function maskSensitiveHeaders(headers) {
   if (!headers) return {};
-  return { ...headers };
-  
-  // Old masking code (disabled):
-  // const masked = { ...headers };
-  // const sensitiveKeys = ["authorization", "x-api-key", "cookie", "token"];
-  // 
-  // for (const key of Object.keys(masked)) {
-  //   const lowerKey = key.toLowerCase();
-  //   if (sensitiveKeys.some(sk => lowerKey.includes(sk))) {
-  //     const value = masked[key];
-  //     if (value && value.length > 20) {
-  //       masked[key] = value.slice(0, 10) + "..." + value.slice(-5);
-  //     }
-  //   }
-  // }
-  // return masked;
+  const entries = typeof headers.entries === "function" ? headers.entries() : Object.entries(headers);
+  const masked = {};
+  for (const [key, value] of entries) {
+    masked[key] = /authorization|api[-_]?key|cookie|token|secret/i.test(key)
+      ? "[REDACTED]"
+      : value;
+  }
+  return masked;
 }
 
 // No-op logger when logging is disabled
@@ -171,7 +163,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         status,
         statusText,
-        headers: headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {},
+        headers: maskSensitiveHeaders(headers),
         body
       });
     },
@@ -229,9 +221,6 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
   };
 }
 
-// Legacy stubs (kept for backward compatibility, not exported)
-function logRequest() {}
-function logResponse() {}
 export function logError(provider, { error, url, model, requestBody }) {
   if (!fs || !LOGS_DIR) return;
   

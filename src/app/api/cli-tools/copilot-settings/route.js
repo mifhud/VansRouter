@@ -1,9 +1,11 @@
 "use server";
 
 import { NextResponse } from "next/server";
+import { resolveCliApiKey } from "../resolveApiKey.js";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
+import { readJsoncFile } from "../_shared/cliConfig.js";
 
 // Resolve chatLanguageModels.json path per OS
 const getConfigPath = () => {
@@ -18,17 +20,7 @@ const getConfigPath = () => {
   return path.join(home, ".config", "Code", "User", "chatLanguageModels.json");
 };
 
-const readConfig = async () => {
-  try {
-    const content = await fs.readFile(getConfigPath(), "utf-8");
-    // Tolerate JSONC (trailing commas) and treat unparseable files as "no config"
-    // rather than throwing a 500 that the UI misreads as "tool not installed".
-    const stripped = content.replace(/,(\s*[}\]])/g, "$1");
-    return JSON.parse(stripped);
-  } catch (error) {
-    return null;
-  }
-};
+const readConfig = () => readJsoncFile(getConfigPath());
 
 const has9RouterConfig = (config) => {
   if (!Array.isArray(config)) return false;
@@ -76,7 +68,7 @@ export async function POST(request) {
     let config = Array.isArray(parsed) ? parsed : [];
 
     const endpointUrl = `${baseUrl}/chat/completions#models.ai.azure.com`;
-    const keyToUse = apiKey || "sk_9router";
+    const keyToUse = await resolveCliApiKey(apiKey);
 
     const newEntry = {
       name: "9Router",

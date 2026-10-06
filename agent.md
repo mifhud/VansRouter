@@ -5,45 +5,55 @@ File ini berisi panduan benar untuk mem-build dan menjalankan aplikasi Next.js `
 ## 1. Konfigurasi Environment
 Pastikan file `.env` sudah diatur dengan benar dan pastikan `PORT` telah disesuaikan (contoh `PORT=3003`) agar sesuai dengan proxy (seperti Nginx atau Cloudflare).
 
-## 2. Build Aplikasi
-Aplikasi ini menggunakan output mode `standalone` dari Next.js untuk optimasi ukuran deployment.
-Gunakan perintah berikut untuk melakukan build:
+## 2. Atomic Build dan Deployment
+Aplikasi menggunakan output mode `standalone`. Jangan menyalin atau menghapus `.next/standalone` saat PM2 masih melayani traffic: HTML dari release lama dapat meminta hashed chunk yang sedang hilang.
+
+Gunakan deployment atomik dari root proyek:
 ```bash
-pnpm run build
+PORT=3003 node scripts/deploy-atomic.cjs
 ```
 
-## 3. Menyalin Static Assets (Penting!)
-Dalam mode `standalone`, Next.js tidak secara otomatis memindahkan aset statis untuk mode produksi, yang dapat mengakibatkan gambar (icons) atau file CSS hilang dari antarmuka web.
-Setelah proses build selesai, jalankan perintah ini dari root folder proyek:
+Script membangun release terisolasi, menormalisasi symlink pnpm, menghapus build source, memverifikasi manifest/static/HTML, lalu menjalankan smoke check dengan `DATA_DIR` dan `HOME` terisolasi. PM2 menunjuk ke launcher persisten `custom-server.js` (dengan `server.js` mengikuti `RELEASE_SERVER`) melalui `ecosystem.config.cjs`; tanpa `DATA_DIR`, path kompatibilitas default adalah `~/.9router`, sedangkan deployment production `/var/lib/9router` harus `export DATA_DIR=/var/lib/9router`. PM2 tidak boleh menunjuk langsung ke release di `/tmp`. Smoke check juga memverifikasi `/api/ready`, `/api/version`, dan aset HTML; PM2 state disimpan hanya setelah semua gate lulus.
+
+## 2a. Fresh-installer verification
+ sebelum deploy, gunakan layout pnpm default (tanpa `shamefully-hoist`):
 ```bash
-cp -r public .next/standalone/public
-cp -r .next/static .next/standalone/.next/static
+pnpm install --frozen-lockfile
+NEXT_DIST_DIR=.next-ci pnpm run build
+NEXT_DIST_DIR=.next-ci node scripts/verify-release-artifact.cjs
+```
+CLI consumer juga harus dibuild dan diuji dari tarball:
+```bash
+pnpm run cli:pack
+VERSION=$(node -p "require('./package.json').version")
+node cli/scripts/validate-package.cjs "../vansrouter-${VERSION}.tgz" "$VERSION"
+node cli/scripts/smoke-package.cjs "../vansrouter-${VERSION}.tgz" "$VERSION"
 ```
 
-## 4. Menjalankan dengan PM2
-Jalankan file `server.js` menggunakan PM2. File ini adalah wrapper yang default ke port `20128` jika `PORT` tidak di-set, dan sangat disarankan untuk tetap mendefinisikan port di environment saat menjalankan PM2 (pastikan port sesuai dengan upstream proxy Nginx Anda, contoh port 3003):
-
+## 3. Rollback
+Release sebelumnya tetap disimpan agar rollback tidak perlu rebuild:
 ```bash
-# Menjalankan instance baru (ganti 3003 sesuai konfigurasi upstream Nginx)
-PORT=3003 pm2 start server.js --name 9router
-
-# Jika aplikasi sudah pernah berjalan sebelumnya, pastikan restart selalu membawa argumen --update-env
-PORT=3003 pm2 restart 9router --update-env
+node scripts/deploy-atomic.cjs rollback
 ```
+Jika `RELEASE_ROOT` atau `CURRENT_LINK` dikonfigurasi, gunakan nilai yang sama untuk deploy dan rollback. Nama volume Docker `9router-data` dan `DATA_DIR` production tidak boleh diubah.
 
-## 5. Simpan Status PM2
-Agar aplikasi akan secara otomatis kembali berjalan sewaktu server direstart, simpan state PM2 saat ini:
+## 4. Persistensi PM2
+
+Agar aplikasi kembali berjalan sewaktu server direstart, simpan state PM2 hanya setelah health/version check deployment berhasil:
 ```bash
 pm2 save
 ```
+Jangan menjalankan `pm2 save` saat eksperimen gagal atau saat `9router` tidak online; PM2 menyimpan daftar proses saat itu.
 
-## Troubleshooting 
+## Troubleshooting
 
-- **502 Bad Gateway:** 
+- **502 Bad Gateway:**
   Masalah 502 dari Cloudflare/Nginx biasanya dikarenakan `9router` berjalan di port default Next.js (3000) sedangkan Nginx mengarah ke port 3003. Selalu periksa `PORT` environment pada PM2 (`pm2 env 9router | grep PORT`).
-  
-- **Ikon Ai atau StyleSheet tidak termuat di Dashboard:**
-  Berarti Anda melewati **Langkah 3** di atas. Pastikan folder `public` dan `.next/static` telah disalin kedalam `.next/standalone/` setelah build baru sebelum me-restart pm2.
+
+- **Loading chunk failed:**
+  Jangan menghapus atau menyalin ulang `.next/standalone` saat PM2 masih aktif. Gunakan `node scripts/deploy-atomic.cjs` agar release baru disiapkan terpisah dan symlink diganti secara atomik.
+- **Ikon atau StyleSheet tidak termuat di Dashboard:**
+  Verifikasi release aktif (`readlink -f "${DATA_DIR:-$HOME/.9router}/current"`) memiliki `public/` dan `.next/static/`.
 
 ---
 
@@ -76,6 +86,27 @@ git diff <v0.9.0-commit> dev --stat  # pastikan tidak ada file custom hilang
 | 17 | Sidebar VansRouter brand | `src/shared/components/Sidebar.js` |
 | 18 | Provider detail connections pagination (10/page) | `src/app/(dashboard)/dashboard/providers/[id]/connectionsPagination.js` |
 | 19 | ACL filter di `GET /v1/models` (validate key + filter providers) | `src/app/api/v1/models/route.js` |
+
+### Aturan Hybrid Upstream
+
+Hybrid **tidak boleh** cherry-pick file penuh dari upstream. Port hanya blok perilaku yang dibutuhkan, lalu pertahankan kontrak lokal berikut:
+
+- `agent.md` tetap ada dan command production di atas tetap valid.
+- PM2 memakai `custom-server.js` yang membungkus launcher `server.js`; jangan menggantinya dengan `.next/standalone/server.js` tanpa mempertahankan default port `3003`.
+- `custom-server.js` juga tetap menjadi entrypoint Docker; jangan menghapus trusted peer header dan proxy-IP handling.
+- `pnpm run build` tetap menyalin `public`, `.next/static`, `src/`, serta shim/runtime yang dibuat `scripts/build.js`.
+- Jangan mengubah nama volume Docker `9router-data`; perubahan memerlukan migrasi dan verifikasi database eksplisit.
+- Fitur VansRouter pada tabel ini harus tetap aktif; verifikasi handler, bukan sekadar import atau nama simbol.
+- Hybrid security patch wajib mempertahankan `allowRemoteNoApiKey`, ACL, trusted internal call, dan multi-account compatible provider.
+- Provider/model hybrid wajib mempertahankan registry lokal, executor khusus, proxy layer, fallback account, dan test baseline.
+
+Validasi minimum setelah setiap hybrid:
+
+```bash
+git diff --check
+pnpm run build
+npx vitest run tests/unit/post-merge-verification.test.js
+```
 
 ### ⚠️ Pelajaran: ACL Block di `GET /v1/models` Pernah Hilang
 

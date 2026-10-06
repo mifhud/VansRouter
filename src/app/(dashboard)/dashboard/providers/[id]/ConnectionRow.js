@@ -12,7 +12,7 @@ const KIRO_ENDPOINT_OPTIONS = [
 ];
 const KIRO_ENDPOINT_LABELS = Object.fromEntries(KIRO_ENDPOINT_OPTIONS.map(o => [o.value, o.label]));
 
-export default function ConnectionRow({ connection, proxyPools, isOAuth, providerId, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onUpdateEndpoint, onEdit, onDelete, oneByOneStatus = null, autoPing = null, isSelected = false, onSelect = null }) {
+export default function ConnectionRow({ connection, proxyPools, isOAuth, providerId, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onUpdateEndpoint, onEdit, onDelete, oneByOneStatus = null, autoPing = null, isSelected = false, onSelect = null, modelAssignmentOptions = null, onModelAssignmentChange = null, strictModelAssignment = false }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [showEndpointDropdown, setShowEndpointDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
@@ -94,6 +94,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
       } else {
         await onUpdateProxy(poolId);
       }
+      setShowProxyDropdown(false);
     } finally {
       setUpdatingProxy(false);
     }
@@ -276,6 +277,22 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
               )}
             </div>
           )}
+          {modelAssignmentOptions && onModelAssignmentChange && (
+            <select
+              value={Object.prototype.hasOwnProperty.call(connection.providerSpecificData || {}, "assignedModel")
+                ? (connection.providerSpecificData.assignedModel || "")
+                : (connection.providerSpecificData?.freebuffModel || "")}
+              onChange={(event) => onModelAssignmentChange(event.target.value)}
+              disabled={!strictModelAssignment}
+              className="mt-2 max-w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] text-text-main"
+              title="Model assignment"
+            >
+              <option value="">Unassigned</option>
+              {modelAssignmentOptions.map((model) => (
+                <option key={model.id} value={model.id}>{model.name || model.id}</option>
+              ))}
+            </select>
+          )}
         </div>
       </div>
       <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
@@ -317,8 +334,9 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
           {/* Proxy button with inline dropdown */}
           {(proxyPools || []).length > 0 && (
             <div className="relative" ref={proxyDropdownRef}>
-              <button
-                onClick={() => setShowProxyDropdown((v) => !v)}
+               <button
+                 type="button"
+                 onClick={() => setShowProxyDropdown((v) => !v)}
                 className={`flex w-full flex-col items-center rounded px-2 py-1 transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${hasAnyProxy ? "text-primary" : "text-text-muted hover:text-primary"}`}
                 disabled={updatingProxy}
               >
@@ -330,27 +348,32 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
               {showProxyDropdown && (
                 <div className="absolute right-0 top-full z-50 mt-1 max-w-[78vw] min-w-[160px] rounded-lg border border-border bg-bg py-1 shadow-lg">
                   {rotationStrategy === "smart" && <p className="px-3 py-1 text-[10px] text-text-muted">Smart skips unfit pools for this provider/model.</p>}
-                  <button
-                    onClick={() => handleSelectProxy("__none__")}
+                   <button
+                     type="button"
+                     onClick={() => handleSelectProxy("__none__")}
                     className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${!boundProxyPoolId ? "text-primary font-medium" : "text-text-main"}`}
                   >
                     None
                   </button>
                   <p className="px-3 pt-2 text-[10px] font-medium uppercase text-text-muted">Rotation</p>
                   {["fill-first", "round-robin", "random", "smart"].map((strategy) => (
-                    <button
-                      key={strategy}
-                      onClick={() => handleAdvancedProxy(strategy, selectedProxyIds.length > 1 ? selectedProxyIds : (proxyPools || []).filter((pool) => pool.isActive).map((pool) => pool.id))}
-                      className={`w-full px-3 py-1.5 text-left text-sm hover:bg-black/5 dark:hover:bg-white/5 ${rotationStrategy === strategy ? "font-medium text-primary" : "text-text-main"}`}
+                     <button
+                       type="button"
+                       key={strategy}
+                       onClick={() => handleAdvancedProxy(strategy, selectedProxyIds.length > 1 ? selectedProxyIds : (proxyPools || []).filter((pool) => pool.isActive).map((pool) => pool.id))}
+                       disabled={updatingProxy}
+                       className={`w-full px-3 py-1.5 text-left text-sm hover:bg-black/5 dark:hover:bg-white/5 ${rotationStrategy === strategy ? "font-medium text-primary" : "text-text-main"}`}
                     >
                       {strategy === "smart" ? "Smart (provider/model aware)" : strategy}
                     </button>
                   ))}
                   <p className="px-3 pt-2 text-[10px] font-medium uppercase text-text-muted">Single pool</p>
                   {(proxyPools || []).map((pool) => (
-                    <button
-                      key={pool.id}
-                      onClick={() => handleSelectProxy(pool.id)}
+                     <button
+                       type="button"
+                       key={pool.id}
+                       onClick={() => handleSelectProxy(pool.id)}
+                       disabled={updatingProxy || pool.isActive !== true}
                       className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"}`}
                     >
                       {pool.name}
@@ -390,5 +413,3 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, provide
     </div>
   );
 }
-
-

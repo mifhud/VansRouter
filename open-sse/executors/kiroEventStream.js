@@ -52,6 +52,8 @@ function stopDisposition(stopReason, hasToolCalls) {
   return "unknown_failure";
 }
 
+const KIRO_TRUNCATION_STOP_REASONS = new Set(["model_context_window_exceeded", "max_tokens"]);
+
 function mergeStopReason(current, incoming) {
   if (!incoming) return current;
   if (!current) return incoming;
@@ -187,14 +189,21 @@ export function transformEventStreamToSSE(response, model, options = {}) {
   };
   const emitTools = (controller) => {
     for (const tool of state.tools.values()) {
-      const input = parsedToolInput(tool);
-      if (tool.name === "tool_call") {
-        if (typeof input.name !== "string" || !input.name.trim()) {
-          throw new Error("Invalid Kiro tool_call payload: missing nested MCP tool name");
+      let input;
+      try {
+        input = parsedToolInput(tool);
+        if (tool.name === "tool_call") {
+          if (typeof input.name !== "string" || !input.name.trim()) {
+            throw new Error("Invalid Kiro tool_call payload: missing nested MCP tool name");
+          }
+          if (!Object.prototype.hasOwnProperty.call(input, "arguments")) {
+            throw new Error("Invalid Kiro tool_call payload: missing nested MCP tool arguments");
+          }
         }
-        if (!Object.prototype.hasOwnProperty.call(input, "arguments")) {
-          throw new Error("Invalid Kiro tool_call payload: missing nested MCP tool arguments");
-        }
+      } catch (error) {
+        state.droppedTools = (state.droppedTools || 0) + 1;
+        state.toolValidationError ||= error.message;
+        continue;
       }
       const index = state.toolCounter++;
       emitDelta(controller, {
@@ -205,14 +214,17 @@ export function transformEventStreamToSSE(response, model, options = {}) {
           function: { name: tool.name, arguments: "" }
         }]
       });
+      const serializedInput = JSON.stringify(input);
       emitDelta(controller, {
         tool_calls: [{ index, function: { arguments: JSON.stringify(input) } }]
       });
+      state.totalContentLength += tool.name.length + serializedInput.length;
       state.hasToolCalls = true;
     }
     state.tools.clear();
     state.bufferedToolBytes = 0;
-    if (state.stopReason === "tool_use" && !state.hasToolCalls) {
+    if (state.stopReason === "tool_use" && !state.hasToolCalls &&
+        !state.hasText && !state.hasReasoning && !state.hasCode) {
       throw new Error("Kiro tool_use stop reason did not include a complete tool call");
     }
   };
@@ -272,7 +284,6 @@ export function transformEventStreamToSSE(response, model, options = {}) {
       emitDelta(controller, { content: event.payload.content });
     } else if (eventType === "toolUseEvent") {
       state.sawToolUse = true;
-      if (state.toolValidationError) return true;
       const values = Array.isArray(event.payload) ? event.payload : [event.payload];
       if (!values[0]) throw new Error("Kiro toolUseEvent is empty");
       for (const value of values) {
@@ -399,11 +410,9 @@ export function transformEventStreamToSSE(response, model, options = {}) {
         if (!processEvent(event, controller)) return false;
       } catch (error) {
         const bufferExceeded = error.code === "KIRO_BUFFER_EXCEEDED";
-        if (!bufferExceeded) {
-          state.toolValidationError ||= error.message;
-          state.tools.clear();
-          state.bufferedToolBytes = 0;
-          continue;
+          if (!bufferExceeded) {
+            state.toolValidationError ||= error.message;
+            continue;
         }
         fail(
           controller,
@@ -434,7 +443,9 @@ export function transformEventStreamToSSE(response, model, options = {}) {
     }
     state.transportState = "clean_eof";
     const declaredDisposition = stopDisposition(state.stopReason, state.sawToolUse);
-    if (["retryable_protocol_failure", "terminal_incomplete", "terminal_refusal", "unknown_failure"].includes(declaredDisposition)) {
+    const declaredTruncatedAfterOutput = declaredDisposition === "terminal_incomplete" &&
+      KIRO_TRUNCATION_STOP_REASONS.has(state.stopReason) && state.chunkIndex > 0;
+    if (!declaredTruncatedAfterOutput && ["retryable_protocol_failure", "terminal_incomplete", "terminal_refusal", "unknown_failure"].includes(declaredDisposition)) {
       const code = declaredDisposition === "retryable_protocol_failure"
         ? "kiro_retryable_protocol_failure"
         : declaredDisposition === "terminal_refusal"
@@ -451,16 +462,6 @@ export function transformEventStreamToSSE(response, model, options = {}) {
       );
       return;
     }
-    if (state.toolValidationError) {
-      fail(
-        controller,
-        "invalid_tool_call",
-        "invalid_kiro_tool_call",
-        state.toolValidationError,
-        { transport_state: state.transportState, stop_disposition: "retryable_protocol_failure" }
-      );
-      return;
-    }
     try {
       emitTools(controller);
     } catch (error) {
@@ -469,6 +470,17 @@ export function transformEventStreamToSSE(response, model, options = {}) {
         "invalid_tool_call",
         "invalid_kiro_tool_call",
         error.message,
+        { transport_state: state.transportState, stop_disposition: "retryable_protocol_failure" }
+      );
+      return;
+    }
+    if (state.toolValidationError && !state.hasToolCalls &&
+        !state.hasText && !state.hasReasoning && !state.hasCode) {
+      fail(
+        controller,
+        "invalid_tool_call",
+        "invalid_kiro_tool_call",
+        state.toolValidationError,
         { transport_state: state.transportState, stop_disposition: "retryable_protocol_failure" }
       );
       return;
@@ -487,7 +499,9 @@ export function transformEventStreamToSSE(response, model, options = {}) {
     }
 
     const disposition = stopDisposition(state.stopReason, state.hasToolCalls);
-    if (["retryable_protocol_failure", "terminal_incomplete", "terminal_refusal", "unknown_failure"].includes(disposition)) {
+    const truncatedAfterOutput = disposition === "terminal_incomplete" &&
+      KIRO_TRUNCATION_STOP_REASONS.has(state.stopReason) && state.chunkIndex > 0;
+    if (!truncatedAfterOutput && ["retryable_protocol_failure", "terminal_incomplete", "terminal_refusal", "unknown_failure"].includes(disposition)) {
       const code = disposition === "retryable_protocol_failure"
         ? "kiro_retryable_protocol_failure"
         : disposition === "terminal_refusal"
@@ -517,7 +531,9 @@ export function transformEventStreamToSSE(response, model, options = {}) {
         total_tokens: prompt + completion
       };
     }
-    const finishReason = state.hasToolCalls
+    const finishReason = truncatedAfterOutput || declaredTruncatedAfterOutput
+      ? "length"
+      : state.hasToolCalls
       ? "tool_calls"
       : disposition === "length"
         ? "length"
@@ -528,7 +544,7 @@ export function transformEventStreamToSSE(response, model, options = {}) {
     options.onTerminalState?.(diagnostics({
       terminal_provenance: state.terminalProvenance || "clean_eventstream_eof",
       transport_state: state.transportState,
-      stop_disposition: disposition
+      stop_disposition: truncatedAfterOutput || declaredTruncatedAfterOutput ? "length" : disposition
     }));
   };
 

@@ -46,7 +46,7 @@ describe("Codex CLI Responses → OpenAI", () => {
 });
 
 describe("OpenAI → Codex Responses (reverse)", () => {
-  it("maps developer messages to Responses API instructions", () => {
+  it("maps developer messages to Responses API instructions and preserves in input as developer role", () => {
     const out = O2R({
       messages: [
         { role: "developer", content: "Follow the project rules." },
@@ -56,6 +56,7 @@ describe("OpenAI → Codex Responses (reverse)", () => {
 
     expect(out.instructions).toBe("Follow the project rules.");
     expect(out.input).toEqual([
+      { type: "message", role: "developer", content: [{ type: "input_text", text: "Follow the project rules." }] },
       { type: "message", role: "user", content: [{ type: "input_text", text: "Hello" }] },
     ]);
   });

@@ -1,3 +1,4 @@
+import { readBoundedJson } from "../utils/boundedBody.js";
 import {
   getProviderCredentials,
   markAccountUnavailable,
@@ -26,12 +27,10 @@ import { handleSearchCore } from "open-sse/handlers/search/index.js";
  * @param {Request} request
  */
 export async function handleSearch(request) {
-  let body;
-  try {
-    body = await request.json();
-  } catch {
+  const { body, error } = await readBoundedJson(request);
+  if (error) {
     log.warn("SEARCH", "Invalid JSON body");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
+    return error;
   }
 
   const url = new URL(request.url);
@@ -71,7 +70,7 @@ export async function handleSearch(request) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: provider (or model)");
   }
 
-  if (!isKindAllowed(apiKeyInfo, "web")) {
+  if (!isKindAllowed(apiKeyInfo, "webSearch")) {
     log.warn("AUTH", "Web search kind not allowed for API key");
     return errorResponse(HTTP_STATUS.FORBIDDEN, "Web search requests are not allowed for this API key");
   }
@@ -157,7 +156,8 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
     offset: body.offset,
     domain_filter: body.domain_filter,
     content_options: body.content_options,
-    provider_options: body.provider_options
+    provider_options: body.provider_options,
+    exa_options: body.exa_options || body.exa || body
   };
 
   // No-auth providers (e.g. searxng) bypass credential lookup
@@ -179,8 +179,33 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
   let lastError = null;
   let lastStatus = null;
 
+  // Credential fallback: some search providers reuse the API key of a related
+  // chat provider (e.g. ollama-search reuses the `ollama` chat key, zai-search
+  // reuses the `glm` chat key). When the search provider has no own connection,
+  // fall back to the linked provider's credentials.
+  const fallbackProviderId = resolvedProvider.credentialFallback;
+
+  // Lock scope for this handler. Without it markAccountUnavailable would write
+  // an account-wide `__all` lock, which on the credentialFallback path takes
+  // the shared chat key (e.g. glm) offline for chat as well. Must be passed to
+  // getProviderCredentials too, so the lock is read back under the same key.
+  const searchLockKey = `websearch:${providerId}`;
+
   while (true) {
-    const credentials = await getProviderCredentials(providerId, excludeConnectionIds);
+    // Provider that actually owns the connection in use — differs from
+    // providerId once we fall back, and error locks must be attributed to it.
+    let credentialProviderId = providerId;
+    let credentials = await getProviderCredentials(providerId, excludeConnectionIds, searchLockKey);
+
+    // Fall back to the related chat provider's credentials when this search
+    // provider has none of its own (one key, chat + search).
+    if (!credentials && fallbackProviderId) {
+      credentials = await getProviderCredentials(fallbackProviderId, excludeConnectionIds, searchLockKey);
+      if (credentials) {
+        credentialProviderId = fallbackProviderId;
+        log.info("AUTH", `\x1b[32m${providerId} reusing ${fallbackProviderId} credentials\x1b[0m`);
+      }
+    }
 
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
@@ -222,7 +247,18 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
 
     if (result.success) return result.response;
 
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, providerId);
+    // Do NOT lock the account or trigger account fallback on 400/422 (client request validation errors)
+    if (result.status === 400 || result.status === 422) {
+      return result.response;
+    }
+
+    const { shouldFallback } = await markAccountUnavailable(
+      credentials.connectionId,
+      result.status,
+      result.error,
+      credentialProviderId,
+      searchLockKey
+    );
 
     if (shouldFallback) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);

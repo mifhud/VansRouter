@@ -1,4 +1,4 @@
-// Provider transport schema: shared defaults + endpoint defaults + resolver (skeleton, not wired)
+// Provider transport schema: shared defaults + endpoint defaults
 import { DEFAULT_RETRY_CONFIG, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 
 /**
@@ -39,8 +39,8 @@ import { DEFAULT_RETRY_CONFIG, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtim
  */
 
 // Shared transport defaults — provider only overrides fields that differ.
-// NOTE: runtime (index.js buildTransport) only re-applies `format`; the rest documents the contract
-// and feeds the (currently unwired) resolveProvider(). Adding keys here does NOT change PROVIDERS.
+// NOTE: runtime (index.js buildTransport) only re-applies `format`; the rest documents the contract.
+// Adding keys here does NOT change PROVIDERS.
 export const PROVIDER_DEFAULTS = {
   baseUrl: "",
   format: "openai",
@@ -62,15 +62,11 @@ export const ENDPOINT_DEFAULTS = {
   gemini: { chat: "/{model}:streamGenerateContent", models: "/models", test: "/models" }
 };
 
-// Deep-merge a provider entry over PROVIDER_DEFAULTS (defensive for missing transport)
-export function resolveProvider(entry) {
-  const transport = (entry && entry.transport) || {};
-  return {
-    ...PROVIDER_DEFAULTS,
-    ...transport,
-    headers: { ...PROVIDER_DEFAULTS.headers, ...transport.headers },
-    auth: { ...PROVIDER_DEFAULTS.auth, ...transport.auth },
-    quirks: { ...PROVIDER_DEFAULTS.quirks, ...transport.quirks },
-    retry: { ...PROVIDER_DEFAULTS.retry, ...transport.retry }
-  };
+// Derive the models-list / validation URL from a registry transport.
+// Explicit transport.validateUrl wins; otherwise strip known chat suffixes
+// (/chat/completions, /messages, /chatbot) and append the shared test path.
+export function deriveValidateUrl(regCfg) {
+  if (!regCfg?.baseUrl) return null;
+  if (regCfg.validateUrl) return regCfg.validateUrl;
+  return regCfg.baseUrl.replace(/\/(chat\/completions|messages|chatbot)$/, "") + ENDPOINT_DEFAULTS.openai.test;
 }

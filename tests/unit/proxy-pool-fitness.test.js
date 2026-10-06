@@ -18,7 +18,7 @@ vi.mock("@/models", () => ({
 }));
 
 import { markPoolUnfit, clearPoolUnfit, clearAllPoolUnfit, isPoolFit, fitPoolIds, poolFitnessSnapshot, pruneExpired, resetPoolFitness } from "open-sse/services/proxyPoolFitness.js";
-import { pickProxyPoolId } from "../../src/lib/network/connectionProxy.js";
+import { pickProxyPoolId, resolveConnectionProxyConfig } from "../../src/lib/network/connectionProxy.js";
 
 describe("proxy pool fitness registry", () => {
   beforeEach(async () => { fitnessRows.clear(); await resetPoolFitness(); });
@@ -60,5 +60,24 @@ describe("proxy pool fitness registry", () => {
     await markPoolUnfit("p1", "provider::model", Date.now() + 60_000);
     await markPoolUnfit("p2", "provider::model", Date.now() + 60_000);
     expect(pickProxyPoolId(["p1", "p2"], "smart", "provider", [], { scope: "provider::model" })).toBeNull();
+  });
+
+  it("returns a Freebuff no-fit result instead of falling back to direct egress", async () => {
+    await markPoolUnfit("p1", "freebuff::model", Date.now() + 60_000);
+    const result = await resolveConnectionProxyConfig({
+      proxyPoolIds: ["p1"],
+      proxyRotationStrategy: "smart",
+      proxyPoolScope: "freebuff::model",
+    });
+    expect(result).toMatchObject({ noFitPool: true, strictProxy: true });
+    expect(result.connectionProxyEnabled).toBe(false);
+  });
+
+  it("fails closed for an invalid explicitly selected Freebuff pool", async () => {
+    const result = await resolveConnectionProxyConfig({
+      proxyPoolId: "missing",
+      proxyPoolScope: "freebuff::model",
+    });
+    expect(result).toMatchObject({ noFitPool: true, strictProxy: true });
   });
 });

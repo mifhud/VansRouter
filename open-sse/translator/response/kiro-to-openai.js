@@ -7,7 +7,7 @@ import { FORMATS } from "../formats.js";
 import { ROLE, OPENAI_BLOCK } from "../schema/index.js";
 import { buildChunk } from "../concerns/chunk.js";
 import { toOpenAIUsage } from "../concerns/usage.js";
-import { fallbackToolCallId } from "../concerns/toolCall.js";
+import { fallbackToolCallId, restoreToolName } from "../concerns/toolCall.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
 
@@ -24,7 +24,8 @@ export function kiroToOpenAIResponse(chunk, state) {
   
   if (!chunk) return null;
 
-  // If chunk is already in OpenAI format (from executor transform), return as-is
+  // If chunk is already in OpenAI format (from executor transform), return it
+  // with the client's tool names restored.
   if (chunk.object === "chat.completion.chunk" && chunk.choices) {
     // Track finish reason so stream.js TRANSLATE mode can inject body-based
     // usage estimation into the final chunk forwarded to the client.
@@ -32,7 +33,25 @@ export function kiroToOpenAIResponse(chunk, state) {
     if (finishReason) {
       state.finishReason = finishReason;
     }
-    return chunk;
+
+    // Restore client-side tool names that were rewritten for the upstream request.
+    if (!(state?.toolNameMap || state?._toolNameMap)?.size) return chunk;
+    return {
+      ...chunk,
+      choices: chunk.choices.map((choice) => {
+        const calls = choice?.delta?.tool_calls;
+        if (!Array.isArray(calls)) return choice;
+        return {
+          ...choice,
+          delta: {
+            ...choice.delta,
+            tool_calls: calls.map((tc) => tc?.function?.name
+              ? { ...tc, function: { ...tc.function, name: restoreToolName(state, tc.function.name) } }
+              : tc),
+          },
+        };
+      }),
+    };
   }
   
   // Handle string chunk (raw SSE data)
@@ -115,7 +134,7 @@ export function kiroToOpenAIResponse(chunk, state) {
     state.hadToolUse = true;
     const toolUse = data.toolUseEvent || data;
     const toolCallId = toolUse.toolUseId || fallbackToolCallId();
-    const toolName = toolUse.name || "";
+    const toolName = restoreToolName(state, toolUse.name);
     const toolInput = toolUse.input || {};
 
     const openaiChunk = buildChunk(chunkMeta(state), {

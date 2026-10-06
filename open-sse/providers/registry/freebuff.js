@@ -20,10 +20,11 @@
  * executors/freebuff.js. cost_mode:"free" is what admits a session on the free
  * (country-gated, session-limited) tier instead of billing credits.
  */
-export default {
+const freebuffRegistry = {
   id: "freebuff",
   priority: 45,
   hasFree: true,
+  freeRefresh: "daily",
   alias: "fb",
   uiAlias: "fb",
   display: {
@@ -64,7 +65,7 @@ export default {
   },
   // Mirrors the CLI's free picker (FREEBUFF_ROOT_AGENT_ID_BY_MODEL).
   // mimo/mimo-v2.5-pro is intentionally absent — it is not a free-tier model
-  // and would bill credits or be rejected under the base2-free agent.
+  // and would bill credits or be rejected under the base3-free agent.
   models: [
     { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash" },
     { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro" },
@@ -82,3 +83,5 @@ export default {
     oauthTimeoutMs: 300000,
   },
 };
+
+export default freebuffRegistry;

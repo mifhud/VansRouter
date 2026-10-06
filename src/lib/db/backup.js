@@ -11,7 +11,7 @@ import path from "node:path";
 import { BACKUPS_DIR, ensureDirs } from "./paths.js";
 import { timestampSlug, getAppVersion } from "./version.js";
 
-const KEEP_BACKUPS = 3;
+const KEEP_BACKUPS = 1;
 
 // Tables excluded from safety backups (large, non-critical, reproducible).
 const BACKUP_EXCLUDE_TABLES = ["requestDetails"];

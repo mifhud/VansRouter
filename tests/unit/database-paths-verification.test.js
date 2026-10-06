@@ -1,7 +1,7 @@
 // Unit tests to ensure database pathing and Docker configurations
 // remain bound to "9router" to prevent data loss on VansRouter upgrades.
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import yaml from "js-yaml";
 
@@ -46,5 +46,20 @@ describe("Database location & fallback path rules", () => {
     const volumeDef = compose.volumes["9router-data"];
     expect(volumeDef).toBeDefined();
     expect(volumeDef.name).toBe("9router-data");
+
+    expect(service.volumes).toContain("vansrouter-data:/migration-data:ro");
+    expect(compose.volumes["vansrouter-data"]).toEqual({ name: "vansrouter-data" });
+    expect(service.image).toContain("VANSROUTER_VERSION");
+    expect(service.image).not.toContain(":latest");
+    expect(read("docs/MIGRATION.md")).not.toContain("~/.vansrouter");
+
+    const dockerfile = read("Dockerfile");
+    expect(dockerfile).toContain("COPY docker/migrate-legacy-volume.cjs");
+    expect(dockerfile).toContain("COPY docker/entrypoint.sh");
+    const entrypoint = read("docker/entrypoint.sh");
+    expect(entrypoint).toContain("migrate-legacy-volume.cjs");
+    expect(entrypoint).toContain("exec su-exec node");
+    expect(read(".env.example")).toContain("INITIAL_PASSWORD=");
+    expect(read(".env.example")).not.toContain("INITIAL_PASSWORD=123456");
   });
 });

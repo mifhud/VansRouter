@@ -39,6 +39,10 @@ export default {
       header: "Authorization",
       scheme: "bearer",
     },
+    // Intl billing endpoint mirrors CN shape (data.Response.Data.Accounts[]).
+    usage: {
+      url: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
+    },
   },
   // Same model lineup exposed by the CN gateway — intl backend is the same catalog.
   models: [
@@ -55,7 +59,7 @@ export default {
     { id: "kimi-k2.5", name: "Kimi-K2.5" },
     { id: "hy3-preview", name: "Hy3 Preview" },
     { id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro" },
-    { id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash" },
+    { id: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash" },
     { id: "deepseek-v3-2-volc", name: "DeepSeek-V3.2" },
   ],
   oauth: {
@@ -68,7 +72,7 @@ export default {
     pollInterval: 5000,
   },
   features: {
-    usage: false,
-    usageApikey: false,
+    usage: true,
+    usageApikey: true,
   },
 };

@@ -26,11 +26,9 @@ tests/unit/   - Vitest unit tests
 # Dev mode
 PORT=20127 NEXT_PUBLIC_BASE_URL=http://localhost:20127 npm run dev
 
-# Build + restart (production, sesuai agent.md)
-pnpm run build
-cp -r public .next/standalone/public
-cp -r .next/static .next/standalone/.next/static
-PORT=3003 pm2 restart 9router --update-env && pm2 save
+# Atomic build + restart (production, sesuai agent.md)
+PORT=3003 node scripts/deploy-atomic.cjs
+pm2 save
 
 # Run tests
 cd tests && node_modules/.bin/vitest run

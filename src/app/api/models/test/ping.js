@@ -1,6 +1,8 @@
 import { getApiKeys } from "@/lib/localDb";
+import { resolveProviderId } from "@/shared/constants/providers.js";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { unwrapClinepassEnvelope } from "open-sse/utils/clinepassEnvelope.js";
 
 const CLI_TOKEN_SALT = "9r-cli-auth";
 
@@ -142,7 +144,7 @@ async function pingModelByKindImpl(model, kind, baseUrl = `http://127.0.0.1:${pr
     headers,
     body: JSON.stringify({
       model,
-      max_tokens: 16, // Claude-on-Copilot returns empty choices at max_tokens:1
+      max_tokens: 1024,
       stream: false,
       messages: [{ role: "user", content: "hi" }],
     }),
@@ -154,9 +156,18 @@ async function pingModelByKindImpl(model, kind, baseUrl = `http://127.0.0.1:${pr
   let parsed = null;
   try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
 
+  const providerId = resolveProviderId(String(model).split("/")[0]);
+  const unwrapped = unwrapClinepassEnvelope(parsed, providerId);
+  parsed = unwrapped.body;
+  if (unwrapped.error) {
+    const detail = typeof unwrapped.error === "string" ? unwrapped.error : (unwrapped.error.message || JSON.stringify(unwrapped.error));
+    const errorStatus = unwrapped.error?.status || unwrapped.error?.statusCode || res.status || 200;
+    return { ok: false, latencyMs, error: `Provider error: ${detail}`, status: errorStatus };
+  }
+
   if (!res.ok) {
     const detail = parsed?.error?.message || parsed?.msg || parsed?.message || parsed?.error || rawText;
-    return { ok: false, latencyMs, error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 240)}` : ""}`, status: res.status };
+    return { ok: false, latencyMs, error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 500)}` : ""}`, status: res.status };
   }
 
   const providerStatus = parsed?.status;
@@ -185,6 +196,11 @@ async function pingModelByKindImpl(model, kind, baseUrl = `http://127.0.0.1:${pr
   }
 
   const hasChoices = Array.isArray(parsed?.choices) && parsed.choices.length > 0;
+  const firstChoice = parsed?.choices?.[0] || {};
+  const hasReasoning = firstChoice.message?.reasoning || firstChoice.message?.reasoning_content || firstChoice.message?.thinking || firstChoice.message?.thinking_content;
+  if (hasChoices && firstChoice.finish_reason === "length" && !String(firstChoice.message?.content || "").trim() && hasReasoning) {
+    return { ok: true, latencyMs, error: null, status: res.status, note: "reasoning-only response (length-limited)" };
+  }
   if (!hasChoices) {
     return {
       ok: false,

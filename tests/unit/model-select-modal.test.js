@@ -71,4 +71,21 @@ describe("computeGroupedModels - activeProviders param (WIP contract)", () => {
 
     expect(groups[CUSTOM_ID].models[0].value).toBe("myprefix/gpt-4");
   });
+
+  it("shows only video models for the video selector", () => {
+    const groups = computeGroupedModels({
+      filteredActiveProviders: [{ provider: "openrouter" }],
+      activeProviders: [{ provider: "openrouter" }],
+      kindFilter: "video",
+      providerNodes: [],
+      customModels: [],
+      disabledModels: {},
+      modelAliases: {},
+      allProviders: { openrouter: { name: "OpenRouter", color: "#666" } },
+    });
+
+    expect(groups.openrouter.models.length).toBeGreaterThan(0);
+    expect(groups.openrouter.models.every((model) => model.kind === "video")).toBe(true);
+    expect(groups.openrouter.models.map((model) => model.id)).toContain("google/veo-3.1");
+  });
 });

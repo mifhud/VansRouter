@@ -19,16 +19,23 @@ const authMocks = vi.hoisted(() => ({
   clearAccountError: vi.fn(async () => {}),
   extractApiKey: vi.fn(() => null),
   isValidApiKey: vi.fn(async () => true),
+  isProviderAllowed: vi.fn(async () => true),
+  isKindAllowed: vi.fn(() => true),
+  isTrustedInternalRequest: vi.fn(async () => false),
 }));
 const tokenMocks = vi.hoisted(() => ({
   checkAndRefreshToken: vi.fn(async (_p, creds) => creds),
   updateProviderCredentials: vi.fn(async () => {}),
 }));
+const dbMocks = vi.hoisted(() => ({
+  getSettings: vi.fn(async () => ({ requireApiKey: false })),
+  getProviderConnectionById: vi.fn(async () => ({ id: "conn-5", provider: "xai", isActive: true })),
+}));
 
 vi.mock("@/sse/services/auth.js", () => authMocks);
 vi.mock("@/sse/services/tokenRefresh.js", () => tokenMocks);
 vi.mock("@/lib/localDb", () => ({
-  getSettings: vi.fn(async () => ({ requireApiKey: false })),
+  ...dbMocks,
   getComboByName: vi.fn(async () => null),
   getModelAliases: vi.fn(async () => ({})),
   getProviderNodes: vi.fn(async () => []),
@@ -62,6 +69,10 @@ beforeEach(() => {
   authMocks.getProviderCredentials.mockReset();
   authMocks.markAccountUnavailable.mockClear();
   authMocks.clearAccountError.mockClear();
+  authMocks.isProviderAllowed.mockReset().mockResolvedValue(true);
+  authMocks.isKindAllowed.mockReset().mockReturnValue(true);
+  authMocks.isTrustedInternalRequest.mockReset().mockResolvedValue(false);
+  dbMocks.getProviderConnectionById.mockReset().mockResolvedValue({ id: "conn-5", provider: "xai", isActive: true });
   tokenMocks.checkAndRefreshToken.mockClear();
 });
 
@@ -189,6 +200,20 @@ describe("handleVideoCreate", () => {
     const res = await handleVideoCreate(makeRequest("{not json"), "generations");
     expect(res.status).toBe(400);
   });
+
+  it("enforces video kind ACL before credentials", async () => {
+    authMocks.isKindAllowed.mockReturnValue(false);
+    const res = await handleVideoCreate(makeRequest({ prompt: "x" }), "generations");
+    expect(res.status).toBe(403);
+    expect(authMocks.getProviderCredentials).not.toHaveBeenCalled();
+  });
+
+  it("enforces provider ACL before credentials", async () => {
+    authMocks.isProviderAllowed.mockResolvedValue(false);
+    const res = await handleVideoCreate(makeRequest({ prompt: "x" }), "generations");
+    expect(res.status).toBe(403);
+    expect(authMocks.getProviderCredentials).not.toHaveBeenCalled();
+  });
 });
 
 describe("handleVideoGet", () => {
@@ -204,16 +229,53 @@ describe("handleVideoGet", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "pending", progress: 42 });
     expect(authMocks.getProviderCredentials).toHaveBeenCalledWith(
-      "xai", null, null, expect.objectContaining({ preferredConnectionId: "conn-5" })
+      "xai", null, null, expect.objectContaining({
+        preferredConnectionId: "conn-5",
+        strictPreferredConnection: true,
+      })
     );
     expect(global.fetch.mock.calls[0][0]).toBe("https://api.x.ai/v1/videos/req-1");
   });
 
+  it("rejects polling without the creating connection id", async () => {
+    const res = await handleVideoGet(new Request("http://localhost/v1/videos/req-1"), "req-1");
+
+    expect(res.status).toBe(400);
+    expect(authMocks.getProviderCredentials).not.toHaveBeenCalled();
+  });
+
+  it("rejects polling when the pinned connection is inactive", async () => {
+    dbMocks.getProviderConnectionById.mockResolvedValueOnce({ id: "conn-5", provider: "xai", isActive: false });
+
+    const res = await handleVideoGet(new Request("http://localhost/v1/videos/req-1", {
+      headers: { "x-connection-id": "conn-5" },
+    }), "req-1");
+
+    expect(res.status).toBe(404);
+    expect(authMocks.getProviderCredentials).not.toHaveBeenCalled();
+  });
+
+  it("does not poll through another account when the pinned account disappears", async () => {
+    authMocks.getProviderCredentials.mockResolvedValueOnce(null);
+
+    const res = await handleVideoGet(new Request("http://localhost/v1/videos/req-1", {
+      headers: { "x-connection-id": "conn-5" },
+    }), "req-1");
+
+    expect(res.status).toBe(400);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(authMocks.getProviderCredentials).toHaveBeenCalledWith(
+      "xai", null, null, expect.objectContaining({ strictPreferredConnection: true })
+    );
+  });
+
   it("records the failure when polling hits a terminal auth error", async () => {
-    authMocks.getProviderCredentials.mockResolvedValueOnce(account({ refreshToken: null }));
+    authMocks.getProviderCredentials.mockResolvedValueOnce(account({ connectionId: "conn-5", refreshToken: null }));
     global.fetch.mockResolvedValueOnce(jsonResponse({ error: "unauthorized" }, 401));
 
-    const res = await handleVideoGet(new Request("http://localhost/v1/videos/req-1"), "req-1");
+    const res = await handleVideoGet(new Request("http://localhost/v1/videos/req-1", {
+      headers: { "x-connection-id": "conn-5" },
+    }), "req-1");
 
     expect(res.status).toBe(401);
     expect(authMocks.markAccountUnavailable).toHaveBeenCalled();

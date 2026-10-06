@@ -20,7 +20,11 @@ import {
 import { parseDataUri } from "../concerns/image.js";
 import { DEFAULT_IMAGE_MIME } from "../schema/index.js";
 import { ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.js";
-import { canonicalizeKiroConversation, normalizeKiroToolSpecs } from "../concerns/kiroConversation.js";
+import {
+  canonicalizeKiroConversation,
+  normalizeKiroToolSpecs,
+  kiroEmptyUserContent,
+} from "../concerns/kiroConversation.js";
 
 /** Render a single tool call as a readable text line. */
 function toolCallToText(name, input) {
@@ -128,7 +132,8 @@ function convertMessages(messages, tools, model) {
 
   const flushPending = () => {
     if (currentRole === "user") {
-      const content = pendingUserContent.join("\n\n").trim() || "continue";
+      const content = pendingUserContent.join("\n\n").trim()
+        || kiroEmptyUserContent(pendingToolResults.length > 0);
       const userMsg = {
         userInputMessage: {
           content: content,
@@ -483,9 +488,9 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
 
   const timestamp = new Date().toISOString();
 
-  // Kiro CLI/KAS sends these as top-level systemPrompt. Keep a content fallback
-  // too because the CodeWhisperer surface does not always enforce top-level
-  // systemPrompt for direct calls.
+  // System directives ride inside the session-start user message content (see
+  // contentPrefix below) rather than a top-level field, because the
+  // CodeWhisperer GenerateAssistantResponse surface rejects the latter.
   const systemPromptParts = [];
   if (thinkingBudget !== null && !usesNativeGptEffort) {
     systemPromptParts.push(buildThinkingSystemPrefix(thinkingBudget));
@@ -522,6 +527,10 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     toolSpecs,
     nameMap,
   });
+  if (!canonical.valid) {
+    console.error(`[Kiro] refusing invalid conversation (openai -> kiro): ${(canonical.errors || []).join(", ") || "unknown"}`);
+    return null;
+  }
   const replayCurrent = canonical.currentMessage.userInputMessage;
 
   const payload = {
@@ -551,7 +560,9 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
   if (profileArn) {
     payload.profileArn = profileArn;
   }
-  if (systemPrompt) payload.systemPrompt = systemPrompt;
+  // No top-level `systemPrompt`: GenerateAssistantResponse answers any payload
+  // carrying it with 400 {"reason":"REQUEST_BODY_INVALID"}. The same text is
+  // already delivered through contentPrefix.
   if (additionalModelRequestFields) {
     payload.additionalModelRequestFields = additionalModelRequestFields;
   }
@@ -568,6 +579,14 @@ export function openaiToKiroRequest(model, body, stream, credentials) {
     value: upstreamModel,
     enumerable: false
   });
+
+  // Kiro tool specs get sanitized names (`mcp.a.b` → `mcp_a_b`); keep the reverse
+  // map so tool calls come back under the client's own names.
+  const restoredToolNames = new Map();
+  for (const [original, sanitized] of nameMap) {
+    if (original !== sanitized) restoredToolNames.set(sanitized, original);
+  }
+  if (restoredToolNames.size) payload._toolNameMap = restoredToolNames;
 
   return payload;
 }

@@ -1,6 +1,5 @@
 "use client";
 
-import PropTypes from "prop-types";
 import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import Image from "next/image";
 
@@ -29,10 +28,6 @@ const SPARK_COUNT = 5;
 
 function getProviderConfig(providerId) {
   return AI_PROVIDERS[providerId] || { color: "#6b7280", name: providerId };
-}
-
-function getProviderImageUrl(providerId) {
-  return getProviderIconSrc(providerId);
 }
 
 // Custom provider node - rectangle with image + name
@@ -268,18 +263,6 @@ function TopologyEdge({
   );
 }
 
-TopologyEdge.propTypes = {
-  id: PropTypes.string,
-  sourceX: PropTypes.number,
-  sourceY: PropTypes.number,
-  targetX: PropTypes.number,
-  targetY: PropTypes.number,
-  sourcePosition: PropTypes.string,
-  targetPosition: PropTypes.string,
-  style: PropTypes.object,
-  data: PropTypes.object,
-};
-
 const nodeTypes = { provider: ProviderNode, router: RouterNode };
 const edgeTypes = { topology: TopologyEdge };
 
@@ -332,7 +315,7 @@ function buildLayout(providers, activeSet, lastSet, errorSet) {
       providerId: p.provider,
       label: (config.name !== p.provider ? config.name : null) || p.nodeName || p.name || p.provider,
       color: config.color || "#6b7280",
-      imageUrl: getProviderImageUrl(p.provider),
+      imageUrl: getProviderIconSrc(p.provider),
       textIcon: config.textIcon || (p.provider || "?").slice(0, 2).toUpperCase(),
       active,
     };

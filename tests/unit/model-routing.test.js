@@ -58,6 +58,31 @@ describe("model routing", () => {
       });
   });
 
+  it("handles combo/ prefix correctly", async () => {
+    const ctx = await setupDb();
+    cleanup = ctx.cleanup;
+
+    const { getComboModels } = await import("@/sse/services/model.js");
+    const { createCombo } = await import("@/models/index.js");
+
+    await createCombo({
+      name: "luma-mini",
+      models: ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+    });
+
+    await expect(ctx.getModelInfo("combo/luma-mini"))
+      .resolves.toEqual({
+        provider: null,
+        model: "luma-mini",
+      });
+
+    await expect(getComboModels("combo/luma-mini"))
+      .resolves.toEqual(["openai/gpt-4o", "anthropic/claude-3-5-sonnet"]);
+
+    await expect(getComboModels("luma-mini"))
+      .resolves.toEqual(["openai/gpt-4o", "anthropic/claude-3-5-sonnet"]);
+  });
+
   it("still routes non-reserved compatible node prefixes", async () => {
     const ctx = await setupDb();
     cleanup = ctx.cleanup;

@@ -9,6 +9,32 @@ import { AntigravityExecutor } from "../../open-sse/executors/antigravity.js";
 const AG2O = (req) =>
   translateRequest(FORMATS.ANTIGRAVITY, FORMATS.OPENAI, "m", { request: req }, true, null, null);
 
+describe("Antigravity request sanitization", () => {
+  it("strips Zed's competitive Claude-agent prompt without mutating other parts", () => {
+    const input = {
+      request: {
+        systemInstruction: {
+          role: "system",
+          parts: [
+            { text: "prefix You are a Claude agent, built on Anthropic's Claude Agent SDK. suffix" },
+            { inlineData: { mimeType: "text/plain", data: "keep" } },
+            { text: "Keep this prompt." },
+          ],
+        },
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      },
+      project: "project-1",
+    };
+    const out = new AntigravityExecutor().transformRequest("gemini-3-flash", input);
+    const parts = out.request.systemInstruction.parts;
+
+    expect(parts[0].text).toBe("prefix  suffix");
+    expect(parts[1]).toEqual({ inlineData: { mimeType: "text/plain", data: "keep" } });
+    expect(parts[2].text).toBe("Keep this prompt.");
+    expect(input.request.systemInstruction.parts[0].text).toContain("Claude Agent SDK");
+  });
+});
+
 describe("Antigravity → OpenAI", () => {
   // antigravity-to-openai.js:177-189 — content with BOTH functionResponse and functionCall/text
   // returns toolResults early → drops the tool calls / text.
@@ -178,7 +204,8 @@ describe("Antigravity executor", () => {
     expect(req.contents).toBeDefined();
     expect(req.systemInstruction).toBeDefined();
     expect(req.generationConfig).toBeDefined();
-    expect(req.sessionId).toBe("sess-123");
+    // The client session id survives, normalized to Antigravity's numeric int64 format.
+    expect(req.sessionId).toMatch(/^-?\d+$/);
 
     // Unexpected fields stripped
     expect(req.max_tokens).toBeUndefined();
@@ -219,7 +246,8 @@ describe("Antigravity executor", () => {
     expect(out.request.contents).toEqual([{ role: "user", parts: [{ text: "hello" }] }]);
     expect(out.request.systemInstruction).toEqual({ role: "user", parts: [{ text: "You are helpful" }] });
     expect(out.request.generationConfig.maxOutputTokens).toBe(32);
-    expect(out.request.sessionId).toBe("sess-123");
+    // Normalized to Antigravity's numeric int64 format, not echoed verbatim.
+    expect(out.request.sessionId).toMatch(/^-?\d+$/);
   });
 
   // Issue #6: v1internal rejects content entries with empty parts[] (400 on all models)
@@ -236,5 +264,91 @@ describe("Antigravity executor", () => {
 
     expect(out.request.contents).toEqual([{ role: "user", parts: [{ text: "prompt" }] }]);
     expect(out.request.contents.every(c => c.parts.length > 0)).toBe(true);
+  });
+
+  it("converts Claude image and document blocks to inlineData for Claude Antigravity models", () => {
+    const claudeReq = {
+      model: "claude-opus-4-6-thinking",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "explain this image" },
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            },
+          },
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data: "JVBERi0xLjEKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2Jq",
+            },
+          },
+        ],
+      }],
+    };
+
+    const out = translateRequest(
+      FORMATS.CLAUDE,
+      FORMATS.ANTIGRAVITY,
+      "claude-opus-4-6-thinking",
+      claudeReq,
+      true,
+      { projectId: "p", connectionId: "c" }
+    );
+
+    const parts = out.request.contents[0].parts;
+    expect(parts).toHaveLength(3);
+    expect(parts[0]).toEqual({ text: "explain this image" });
+    expect(parts[1]).toEqual({
+      inlineData: {
+        mimeType: "image/png",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      },
+    });
+    expect(parts[2]).toEqual({
+      inlineData: {
+        mimeType: "application/pdf",
+        data: "JVBERi0xLjEKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2Jq",
+      },
+    });
+  });
+
+  // Google buckets a chat request that carries requestType as exhausted (429
+  // RESOURCE_EXHAUSTED without detail) even with quota left, so the agent path
+  // must not send one.
+  it("omits requestType for Gemini and Claude Antigravity models", () => {
+    for (const model of ["gemini-3.5-flash-low", "claude-opus-4-6-thinking"]) {
+      const out = translateRequest(FORMATS.OPENAI, FORMATS.ANTIGRAVITY, model, {
+        messages: [{ role: "user", content: "hi" }],
+      }, true, { projectId: "p", connectionId: "c" });
+
+      expect(out.requestType, `model=${model}`).toBeUndefined();
+    }
+  });
+
+  it("drops requestType leaked from a translated envelope", () => {
+    const out = new AntigravityExecutor().transformRequest("gemini-3.5-flash-low", {
+      project: "project-1",
+      model: "gemini-3.5-flash-low",
+      userAgent: "antigravity",
+      requestType: "agent",
+      request: { contents: [{ role: "user", parts: [{ text: "hi" }] }], sessionId: "sess-1" },
+    }, true, { projectId: "project-1", connectionId: "conn-1" });
+
+    expect(out.requestType).toBeUndefined();
+  });
+
+  it("keeps requestType image_gen for image models", () => {
+    const out = new AntigravityExecutor().transformRequest("gemini-3.1-flash-image", {
+      request: { contents: [{ role: "user", parts: [{ text: "a cat" }] }] },
+    }, true, { projectId: "p", connectionId: "c" });
+
+    expect(out.requestType).toBe("image_gen");
   });
 });

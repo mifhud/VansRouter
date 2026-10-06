@@ -3,6 +3,7 @@ import { OAUTH_ENDPOINTS, GITHUB_COPILOT, buildKimiHeaders } from "../../config/
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
+import { assertValidKiroRegion } from "../../config/awsRegion.js";
 
 let _xaiServiceSingleton = null;
 export async function refreshXaiToken(refreshToken, log) {
@@ -46,18 +47,24 @@ export async function refreshAccessToken(provider, refreshToken, credentials, lo
 
   return dedupRefresh(provider, refreshToken, async () => {
   try {
+    // config values come from the registry; gitlab-style providers store the
+    // OAuth client per credential in providerSpecificData instead
+    const params = {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    };
+    const clientId = config.clientId ?? credentials?.providerSpecificData?.clientId;
+    if (clientId !== undefined) params.client_id = clientId;
+    const clientSecret = config.clientSecret ?? credentials?.providerSpecificData?.clientSecret;
+    if (clientSecret !== undefined) params.client_secret = clientSecret;
+
     const response = await fetch(config.refreshUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
       },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-      }),
+      body: new URLSearchParams(params),
     });
 
     if (!response.ok) {
@@ -132,6 +139,53 @@ export async function refreshKimiToken(refreshToken, credentials, log) {
       };
     } catch (error) {
       log?.error?.("TOKEN_REFRESH", `Error refreshing token for kimi`, { error: error.message });
+      return null;
+    }
+  }, log);
+}
+
+export async function refreshClineToken(refreshToken, log) {
+  if (!refreshToken) return null;
+
+  return dedupRefresh("cline", refreshToken, async () => {
+    try {
+      const response = await fetch(PROVIDERS.cline?.refreshUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          refreshToken,
+          grantType: "refresh_token",
+          clientType: "extension",
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        log?.error?.("TOKEN_REFRESH", "Failed to refresh Cline token", {
+          status: response.status,
+          error: errorText,
+        });
+        return null;
+      }
+
+      const body = await response.json();
+      const tokens = body?.data || body;
+      if (!tokens?.accessToken) return null;
+
+      const expiresIn = tokens.expiresAt
+        ? Math.max(1, Math.floor((new Date(tokens.expiresAt).getTime() - Date.now()) / 1000))
+        : (tokens.expiresIn || tokens.expires_in || 3600);
+
+      return {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken || refreshToken,
+        expiresIn,
+      };
+    } catch (error) {
+      log?.error?.("TOKEN_REFRESH", `Error refreshing Cline token: ${error.message}`);
       return null;
     }
   }, log);
@@ -401,6 +455,7 @@ export async function refreshKiroToken(refreshToken, providerSpecificData, log, 
 
   if (clientId && clientSecret) {
     const isIDC = authMethod === "idc";
+    if (isIDC && region) assertValidKiroRegion(region);
     const endpoint = isIDC && region
       ? `https://oidc.${region}.amazonaws.com/token`
       : "https://oidc.us-east-1.amazonaws.com/token";
@@ -618,10 +673,13 @@ export async function refreshCopilotToken(githubAccessToken, log) {
 // CodeBuddy (Tencent) refresh — POST /v2/plugin/auth/token/refresh with the
 // refresh token carried in the X-Refresh-Token header (not a form body),
 // matching the official CodeBuddy CLI. Response: { code: 0, data: <token> }.
-export async function refreshCodebuddyToken(refreshToken, log) {
+// providerId selects the region ("codebuddy-cn" | "codebuddy-intl"); the
+// X-Domain header mirrors that provider's oauth baseUrl host.
+export async function refreshCodebuddyToken(refreshToken, log, providerId = "codebuddy-cn") {
   if (!refreshToken) return null;
-  return dedupRefresh("codebuddy-cn", refreshToken, async () => {
-    const oauth = PROVIDER_OAUTH["codebuddy-cn"] || {};
+  return dedupRefresh(providerId, refreshToken, async () => {
+    const oauth = PROVIDER_OAUTH[providerId] || {};
+    const xDomain = new URL(oauth.baseUrl).host;
     const response = await fetch(oauth.refreshUrl, {
       method: "POST",
       headers: {
@@ -629,7 +687,7 @@ export async function refreshCodebuddyToken(refreshToken, log) {
         Accept: "application/json",
         "User-Agent": oauth.userAgent,
         "X-Requested-With": "XMLHttpRequest",
-        "X-Domain": "copilot.tencent.com",
+        "X-Domain": xDomain,
         "X-Refresh-Token": refreshToken,
         "X-Auth-Refresh-Source": "plugin",
         "X-Product": "SaaS",

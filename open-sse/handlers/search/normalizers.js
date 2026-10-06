@@ -27,7 +27,7 @@ function makeResult(providerId, item, idx, now) {
       image_url: item.image_url || null,
     },
     citation: { provider: providerId, retrieved_at: now, rank: idx + 1 },
-    provider_raw: null,
+    provider_raw: item.provider_data || item.provider_raw || null,
   };
 }
 
@@ -72,7 +72,13 @@ function normalizePerplexity(data, _query, _searchType) {
 function normalizeExa(data, _query, _searchType) {
   const now = new Date().toISOString();
   const items = data.results;
-  if (!Array.isArray(items)) return { results: [], totalResults: null };
+  const metadata = {
+    requestId: data.requestId || null,
+    resolvedSearchType: data.resolvedSearchType || data.searchType || null,
+    costDollars: data.costDollars || null,
+    output: data.output || null,
+  };
+  if (!Array.isArray(items)) return { results: [], totalResults: null, metadata };
   const results = items.map((item, idx) =>
     makeResult("exa", {
       title: item.title,
@@ -85,9 +91,24 @@ function normalizeExa(data, _query, _searchType) {
       image_url: item.image,
       full_text: item.text,
       text_format: "text",
+      provider_data: {
+        id: item.id,
+        publishedDate: item.publishedDate || null,
+        author: item.author || null,
+        image: item.image || null,
+        favicon: item.favicon || null,
+        highlightScores: item.highlightScores || null,
+        summary: item.summary || null,
+        subpages: item.subpages || null,
+        extras: item.extras || null,
+      },
     }, idx, now)
   );
-  return { results, totalResults: results.length };
+  return {
+    results,
+    totalResults: results.length,
+    metadata,
+  };
 }
 
 function normalizeTavily(data, _query, _searchType) {
@@ -106,6 +127,19 @@ function normalizeTavily(data, _query, _searchType) {
     }, idx, now)
   );
   return { results, totalResults: results.length };
+}
+
+function normalizeTinyfish(data) {
+  const now = new Date().toISOString();
+  const items = Array.isArray(data?.results) ? data.results : [];
+  return {
+    results: items.map((item, idx) => makeResult("tinyfish", {
+      title: item.title, url: item.url, snippet: item.snippet,
+      published_at: item.date, source_type: item.publisher || null,
+      author: Array.isArray(item.authors) ? item.authors.join(", ") : null,
+    }, idx, now)),
+    totalResults: data?.total_results ?? null,
+  };
 }
 
 function normalizeGooglePse(data, _query, _searchType) {
@@ -200,6 +234,92 @@ function normalizeSearxng(data, _query, _searchType) {
   return { results, totalResults: results.length };
 }
 
+function normalizeXquik(data, _query, _searchType) {
+  const now = new Date().toISOString();
+  const items = Array.isArray(data.tweets) ? data.tweets : [];
+  const results = items.map((item, idx) => {
+    const username = typeof item?.author?.username === "string" ? item.author.username : "";
+    const authorName = typeof item?.author?.name === "string" ? item.author.name : "";
+    const tweetId = typeof item?.id === "string" ? item.id : String(item?.id || "");
+    const url = username && tweetId
+      ? `https://x.com/${encodeURIComponent(username)}/status/${encodeURIComponent(tweetId)}`
+      : tweetId
+        ? `https://x.com/i/web/status/${encodeURIComponent(tweetId)}`
+        : "";
+    const author = username ? `@${username}` : authorName || null;
+    const title = author ? `${author} on X` : "X post";
+    const imageUrl = Array.isArray(item?.media)
+      ? item.media.find((media) => typeof media?.mediaUrl === "string")?.mediaUrl
+      : null;
+
+    return makeResult("xquik", {
+      title,
+      url,
+      snippet: typeof item?.text === "string" ? item.text : "",
+      published_at: typeof item?.createdAt === "string" ? item.createdAt : null,
+      author,
+      image_url: imageUrl || null,
+      source_type: "x_post",
+      full_text: typeof item?.text === "string" ? item.text : undefined,
+      text_format: "text",
+    }, idx, now);
+  });
+  const nextCursor = typeof data.next_cursor === "string" && data.next_cursor ? data.next_cursor : null;
+  return {
+    results,
+    totalResults: null,
+    pagination: {
+      has_more: data.has_next_page === true,
+      next_cursor: nextCursor,
+    },
+  };
+}
+
+function normalizeOllamaSearch(data, _query, _searchType) {
+  const now = new Date().toISOString();
+  const items = Array.isArray(data.results) ? data.results : [];
+  const results = items.map((item, idx) =>
+    makeResult("ollama-search", {
+      title: item.title,
+      url: item.url,
+      snippet: item.content || "",
+      published_at: item.published_at || null,
+      full_text: item.content || undefined,
+      text_format: "text",
+    }, idx, now)
+  );
+  return { results, totalResults: results.length };
+}
+
+function normalizeGlmSearch(data, _query, _searchType) {
+  const now = new Date().toISOString();
+  // MCP envelope: { result: { content: [{ type: "text", text: "<json>" }] } }
+  let payload = data;
+  try {
+    const rawText = data?.result?.content?.[0]?.text;
+    if (typeof rawText === "string") payload = JSON.parse(rawText);
+  } catch {}
+
+  const items = Array.isArray(payload?.results) ? payload.results
+    : Array.isArray(payload?.items) ? payload.items
+    : Array.isArray(payload) ? payload
+    : [];
+  const results = items.map((item, idx) =>
+    makeResult("glm", {
+      title: item.title,
+      url: item.link || item.url,
+      snippet: item.content || "",
+      published_at: item.publish_time || item.published_at || null,
+      author: item.source || null,
+      image_url: item.icon || null,
+      source_type: "mcp_web_search_prime",
+      full_text: item.content || undefined,
+      text_format: "text",
+    }, idx, now)
+  );
+  return { results, totalResults: results.length };
+}
+
 const NORMALIZERS = {
   "serper": normalizeSerper,
   "brave-search": normalizeBrave,
@@ -211,6 +331,10 @@ const NORMALIZERS = {
   "searchapi": normalizeSearchApi,
   "youcom": normalizeYouCom,
   "searxng": normalizeSearxng,
+  "xquik": normalizeXquik,
+  "tinyfish": normalizeTinyfish,
+  "ollama-search": normalizeOllamaSearch,
+  "glm": normalizeGlmSearch,
 };
 
 /**

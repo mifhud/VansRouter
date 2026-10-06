@@ -14,6 +14,7 @@ export default {
     },
   },
   category: "apikey",
+  hasFree: true,
   transport: {
     baseUrl: "https://api.cline.bot/api/v1/chat/completions",
     thinkingFormat: "openai",
@@ -21,6 +22,7 @@ export default {
       "HTTP-Referer": "https://cline.bot",
       "X-Title": "Cline",
     },
+    quirks: { clineEnvelope: true },
     auth: {
       combined: true,
       header: "Authorization",

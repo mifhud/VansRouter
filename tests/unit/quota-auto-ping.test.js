@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("open-sse/index.js", () => ({}), { virtual: true });
 
@@ -79,6 +79,7 @@ describe("quota auto-ping", () => {
   let getClaudeUsage;
   let getExecutor;
   let codexResponseText;
+  let stopQuotaAutoPing;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -89,7 +90,7 @@ describe("quota auto-ping", () => {
     ({ getCodexUsage } = await import("open-sse/services/usage/codex.js"));
     ({ getClaudeUsage } = await import("open-sse/services/usage/claude.js"));
     ({ getExecutor } = await import("open-sse/executors/index.js"));
-    ({ runQuotaAutoPingTick, configureQuotaAutoPing } = await import("../../src/shared/services/quotaAutoPing.js"));
+    ({ runQuotaAutoPingTick, configureQuotaAutoPing, stopQuotaAutoPing } = await import("../../src/shared/services/quotaAutoPing.js"));
 
     deps = {
       getSettings: vi.fn(),
@@ -107,7 +108,14 @@ describe("quota auto-ping", () => {
       execute: vi.fn().mockResolvedValue({ response: { ok: true, text: codexResponseText } }),
     });
     state = { running: false, resetCache: {}, failureCache: {} };
+    vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    stopQuotaAutoPing?.();
+    vi.useRealTimers();
+    delete global.__quotaAutoPing;
   });
 
   it("does not ping Codex when setting is absent", async () => {
@@ -120,8 +128,6 @@ describe("quota auto-ping", () => {
   });
 
   it("starts the scheduler only when an account opts in", () => {
-    vi.useFakeTimers();
-
     configureQuotaAutoPing({ codexAutoPing: { connections: {} } });
     expect(vi.getTimerCount()).toBe(0);
 
@@ -130,7 +136,6 @@ describe("quota auto-ping", () => {
   });
 
   it("stops the scheduler when the last account opts out", () => {
-    vi.useFakeTimers();
     configureQuotaAutoPing({ claudeAutoPing: { connections: { "claude-1": true } } });
 
     configureQuotaAutoPing({ claudeAutoPing: { connections: { "claude-1": false } } });

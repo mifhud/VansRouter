@@ -14,7 +14,9 @@ export const MODEL_DEFAULTS = {
   kind: "llm",
   quotaFamily: "normal",
   strip: [],
-  targetFormat: null
+  targetFormat: null,
+  hasFree: false,
+  freeRefresh: null
 };
 
 // Normalize a registry model entry: accept terse "id" string, fill name via regex when omitted.
@@ -37,4 +39,16 @@ export function modelStrip(model) {
 }
 export function modelTargetFormat(model) {
   return model?.targetFormat || MODEL_DEFAULTS.targetFormat;
+}
+
+export function modelSupportedFormats(model) {
+  return model?.supportedFormats || null;
+}
+
+// Free-tier flags (annotated on the registry, consumed by freeTiers.js).
+export function modelHasFree(model) {
+  return model?.hasFree ?? MODEL_DEFAULTS.hasFree;
+}
+export function modelFreeRefresh(model) {
+  return model?.freeRefresh ?? MODEL_DEFAULTS.freeRefresh;
 }

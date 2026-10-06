@@ -10,13 +10,19 @@
 !.yarn/releases
 !.yarn/versions
 package-lock.json
+!cli/package-lock.json
+!docker/native-deps/package-lock.json
+!gitbook/package-lock.json
 
 # =============================================================================
 # Build output
 # =============================================================================
 /.next/
+/.next-atomic-*/
 /.next-cli-build/
 /out/
+/gitbook/out/
+/gitbook/.next/
 /build
 cli/.build-home/
 
@@ -91,6 +97,7 @@ test/*
 open-sse/test/*
 open-sse.old/
 ecosystem.config.*
+!ecosystem.config.cjs
 deploy*.sh
 scripts/agSniffer/*
 gitbooks/*
@@ -122,3 +129,6 @@ next-env.d.ts
 .graphifyignore
 graphify-out/*
 .next-analyze/*
+
+# CLI package smoke scratch dir (CI + local `npm pack` verification)
+.ci-cli-smoke/

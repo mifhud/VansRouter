@@ -62,6 +62,15 @@ function stripOpenAI(body, caps) {
   if (!Array.isArray(body.messages)) return;
   const last = body.messages.length - 1;
   body.messages.forEach((msg, i) => {
+    if (caps.vision === false) {
+      delete msg.images;
+      for (const key of ["experimental_attachments", "attachments"]) {
+        if (Array.isArray(msg[key])) msg[key] = msg[key].filter((a) => {
+          const mime = a?.contentType || a?.mediaType || "";
+          return !mime.startsWith("image/") && !(typeof a?.url === "string" && a.url.startsWith("data:image/"));
+        });
+      }
+    }
     if (!Array.isArray(msg.content)) return;
     const removed = new Set();
     msg.content = filterBlocks(msg.content, capForOpenAIBlock, caps, removed, i === last);

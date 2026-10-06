@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS, capRetryAttemptsByAccountCount } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS, capRetryAttemptsByAccountCount } from "../config/runtimeConfig.js";
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { dbg } from "../utils/debugLog.js";
@@ -23,8 +23,8 @@ export class BaseExecutor {
     return this.config.baseUrls || (this.config.baseUrl ? [this.config.baseUrl] : []);
   }
 
-  getFallbackCount() {
-    return this.getBaseUrls().length || 1;
+  getFallbackCount(credentials = null) {
+    return this.getBaseUrls(credentials).length || 1;
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
@@ -43,6 +43,9 @@ export class BaseExecutor {
     return baseUrls[urlIndex] || baseUrls[0] || this.config.baseUrl;
   }
 
+  // Contract for every executor: slot 3 is the resolved upstream URL, slot 4 the
+  // model id, slot 5 the request body as translated before the call (base.execute
+  // passes all three). Subclasses that ignore the extra slots declare fewer params.
   buildHeaders(credentials, stream = true) {
     const headers = {
       "Content-Type": "application/json",
@@ -80,8 +83,8 @@ export class BaseExecutor {
     return body;
   }
 
-  shouldRetry(status, urlIndex) {
-    return status === HTTP_STATUS.RATE_LIMITED && urlIndex + 1 < this.getFallbackCount();
+  shouldRetry(status, urlIndex, credentials = null) {
+    return status === HTTP_STATUS.RATE_LIMITED && urlIndex + 1 < this.getFallbackCount(credentials);
   }
 
   // Override in subclass for provider-specific refresh
@@ -97,8 +100,8 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, accountCount = 0 }) {
-    const fallbackCount = this.getFallbackCount();
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, accountCount = 0, providerOverrides = null }) {
+    const fallbackCount = this.getFallbackCount(credentials);
     let lastError = null;
     let lastStatus = 0;
     const retryAttemptsByUrl = {};
@@ -132,7 +135,9 @@ export class BaseExecutor {
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
       const url = this.buildUrl(model, stream, urlIndex, credentials);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
-      const headers = this.buildHeaders(credentials, stream);
+      const headers = this.buildHeaders(credentials, stream, url, model, transformedBody);
+      // User per-provider override wins over registry headers (blocked names filtered at the API)
+      if (providerOverrides?.headers) Object.assign(headers, providerOverrides.headers);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
@@ -150,6 +155,7 @@ export class BaseExecutor {
           method: "POST",
           headers,
           body: bodyStr,
+          provider: this.provider,
           signal: mergedSignal
         }, proxyOptions);
         clearTimeout(connectTimer);
@@ -159,7 +165,7 @@ export class BaseExecutor {
 
         if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { urlIndex--; continue; }
 
-        if (this.shouldRetry(response.status, urlIndex)) {
+        if (this.shouldRetry(response.status, urlIndex, credentials)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
           lastStatus = response.status;
           continue;

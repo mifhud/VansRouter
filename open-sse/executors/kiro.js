@@ -5,6 +5,7 @@ import { refreshKiroToken } from "../services/tokenRefresh.js";
 import { SSE_HEADERS } from "../utils/sseConstants.js";
 import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { transformEventStreamToSSE } from "./kiroEventStream.js";
+import { assertValidKiroRegion } from "../config/awsRegion.js";
 
 const KIRO_REPAIR_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
 const KIRO_REPAIR_HEARTBEAT_MS = 10_000;
@@ -98,9 +99,16 @@ async function readResponsePrefix(response, signal, maxBytes, timeoutMs) {
 function appendRepairInstruction(body, kind) {
   const repaired = structuredClone(body || {});
   const instruction = REPAIR_INSTRUCTIONS[kind] || "Retry the previous incomplete Kiro response.";
-  repaired.systemPrompt = repaired.systemPrompt
-    ? `${repaired.systemPrompt}\n\n${instruction}`
-    : instruction;
+  delete repaired.systemPrompt;
+  const message = repaired.conversationState?.currentMessage?.userInputMessage || {};
+  message.content = [message.content, instruction].filter(Boolean).join("\n\n");
+  repaired.conversationState = {
+    ...(repaired.conversationState || {}),
+    currentMessage: {
+      ...(repaired.conversationState?.currentMessage || {}),
+      userInputMessage: message,
+    },
+  };
   return repaired;
 }
 
@@ -193,7 +201,14 @@ export class KiroExecutor extends BaseExecutor {
   }
 
   /**
-   * Auth-aware endpoint ordering.
+   * Region- and auth-aware endpoint ordering.
+   *
+   * Region first: the registry baseUrls are hardcoded us-east-1. An IAM Identity
+   * Center account homed elsewhere (e.g. eu-central-1) only resolves through the
+   * regional Amazon Q host, so it gets that single endpoint. Rewriting the host
+   * per-region is not an option — `codewhisperer.<region>.amazonaws.com` does not
+   * exist outside us-east-1. us-east-1 (and an unset region) keeps the registry
+   * list untouched, so existing accounts are unaffected.
    *
    * API-key Kiro connections store a raw CodeWhisperer credential (validated
    * against codewhisperer.us-east-1.amazonaws.com via ListAvailableProfiles).
@@ -204,30 +219,29 @@ export class KiroExecutor extends BaseExecutor {
    * CodeWhisperer hosts FIRST, mirroring the Kiro-Go reference fork which never
    * routes api-key traffic through kiro.dev. External IdP enterprise tokens also
    * use the CodeWhisperer surface, with the `TokenType: EXTERNAL_IDP` header.
+   * IAM Identity Center (idc) tokens are AWS SSO access tokens from the same
+   * family; the kiro.dev gateway rejects them with 403 "bearer token invalid".
    * Other OAuth methods keep the default order (kiro.dev first) since their
    * tokens are what that gateway accepts.
    */
   getOrderedBaseUrls(credentials) {
+    const region = (credentials?.providerSpecificData?.region || "us-east-1").trim() || "us-east-1";
+    assertValidKiroRegion(region);
+    if (region && region !== "us-east-1") {
+      return [`https://q.${region}.amazonaws.com/generateAssistantResponse`];
+    }
     const baseUrls = this.getBaseUrls();
     const authMethod = credentials?.providerSpecificData?.authMethod;
-    // IAM Identity Center (idc) tokens are AWS SSO access tokens — the same
-    // family as external_idp/api_key. The kiro.dev gateway rejects them with
-    // 403 "bearer token invalid", so they must hit the CodeWhisperer
-    // *.amazonaws.com surface, and in the region the token was minted in
-    // (the baseUrls are hardcoded us-east-1).
     const isCodeWhispererSurface =
       authMethod === "api_key" || authMethod === "external_idp" || authMethod === "idc";
     if (!isCodeWhispererSurface) return baseUrls;
-
-    const region = (credentials?.providerSpecificData?.region || "us-east-1").trim();
-    const regionalize = (u) =>
-      region && region !== "us-east-1" && u.includes("amazonaws.com")
-        ? u.replace(/([a-z]+)\.[a-z0-9-]+\.amazonaws\.com/, `$1.${region}.amazonaws.com`)
-        : u;
-
-    const amazon = baseUrls.filter((u) => u.includes("amazonaws.com")).map(regionalize);
+    const amazon = baseUrls.filter((u) => u.includes("amazonaws.com"));
     const others = baseUrls.filter((u) => !u.includes("amazonaws.com"));
     return amazon.length > 0 ? [...amazon, ...others] : baseUrls;
+  }
+
+  getFallbackCount(credentials = null) {
+    return this.getOrderedBaseUrls(credentials).length || 1;
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {

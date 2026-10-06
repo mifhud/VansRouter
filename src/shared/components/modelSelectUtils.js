@@ -1,4 +1,4 @@
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import {
   OAUTH_PROVIDERS,
   APIKEY_PROVIDERS,
@@ -28,17 +28,18 @@ export function computeGroupedModels({
   disabledModels,
   modelAliases,
   allProviders,
+  cursorModels = [],
 }) {
   const groups = {};
 
   const PROVIDER_AS_MODEL_KINDS = new Set(["webSearch", "webFetch"]);
-  const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText"]);
+  const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText", "video"]);
   const ALLOW_PROVIDER_FALLBACK_KINDS = new Set(["tts", "image", "webFetch"]);
 
   const filterByKind = (models) => {
-    if (!kindFilter) return models.filter((m) => m.isPlaceholder || !m.type || m.type === "llm");
+    if (!kindFilter) return models.filter((m) => m.isPlaceholder || m.isCustom || !getModelKind(m) || getModelKind(m) === "llm");
     if (!TYPED_KINDS.has(kindFilter)) return models;
-    return models.filter((m) => m.isPlaceholder || m.type === kindFilter);
+    return models.filter((m) => m.isPlaceholder || getModelKind(m) === kindFilter);
   };
 
   const activeConnectionIds = filteredActiveProviders.map((p) => p.provider);
@@ -78,16 +79,41 @@ export function computeGroupedModels({
         return acc;
       }, []);
 
+      const customRegisteredModels = customModels
+        .filter((m) => m.providerAlias === alias)
+        .map((m) => ({
+          id: m.id,
+          name: m.name || m.id,
+          value: `${alias}/${m.id}`,
+          kind: getModelKind(m),
+          isCustom: true,
+        }));
       let combined = aliasModels;
       if (kindFilter && TYPED_KINDS.has(kindFilter)) {
-        combined = getModelsByProviderId(providerId).reduce((acc, m) => {
-          if (m.type === kindFilter) acc.push({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type });
-          return acc;
-        }, []);
+        const registeredTyped = customRegisteredModels.filter((m) => getModelKind(m) === kindFilter);
+        combined = [
+          ...registeredTyped,
+          ...getModelsByProviderId(providerId)
+            .filter((m) => getModelKind(m) === kindFilter)
+            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
+            .filter((m) => !registeredTyped.some((registered) => registered.value === m.value)),
+        ];
         if (combined.length === 0 && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
           const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
           if (supports) combined = [{ id: providerId, name: providerInfo.name, value: alias }];
         }
+      } else {
+        const registeredLlms = customRegisteredModels.filter((m) => !getModelKind(m) || getModelKind(m) === "llm");
+        const seen = new Set([...aliasModels, ...registeredLlms].map((m) => m.value));
+        const hardcoded = getModelsByProviderId(providerId)
+          .filter((m) => !getModelKind(m) || getModelKind(m) === "llm")
+          .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) }))
+          .filter((m) => !seen.has(m.value));
+        combined = [
+          ...registeredLlms,
+          ...aliasModels.filter((m) => !registeredLlms.some((registered) => registered.value === m.value)),
+          ...hardcoded,
+        ];
       }
 
       if (combined.length > 0) {
@@ -114,8 +140,13 @@ export function computeGroupedModels({
         }
         return acc;
       }, []);
+      const registeredCustom = customModels
+        .filter((m) => m.providerAlias === providerId)
+        .map((m) => ({ id: m.id, name: m.name || m.id, value: `${nodePrefix}/${m.id}`, isCustom: true }));
+      const seenNodeModels = new Set(nodeModels.map((m) => m.value));
+      const mergedModels = [...nodeModels, ...registeredCustom.filter((m) => !seenNodeModels.has(m.value))];
 
-      const modelsToShow = nodeModels.length > 0 ? nodeModels : [{
+      const modelsToShow = mergedModels.length > 0 ? mergedModels : [{
         id: `__placeholder__${providerId}`,
         name: `${nodePrefix}/model-id`,
         value: `${nodePrefix}/model-id`,
@@ -128,10 +159,10 @@ export function computeGroupedModels({
         color: providerInfo.color,
         models: modelsToShow,
         isCustom: true,
-        hasModels: nodeModels.length > 0,
+        hasModels: mergedModels.length > 0,
       };
     } else {
-      const hardcodedModels = getModelsByProviderId(providerId);
+      const hardcodedModels = providerId === "cursor" && cursorModels.length > 0 ? cursorModels : getModelsByProviderId(providerId);
       const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
       const hasHardcoded = hardcodedModels.length > 0;
@@ -153,7 +184,7 @@ export function computeGroupedModels({
       }, []);
 
       const merged = [
-        ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type })),
+        ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
         ...customAliasModels,
         ...customRegisteredModels,
       ];

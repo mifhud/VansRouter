@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/shared/utils/cn";
@@ -10,6 +11,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
 import NineRemotePromoModal from "./NineRemotePromoModal";
+const ChangelogModal = dynamic(() => import("./ChangelogModal"), { ssr: false });
 
 // const VISIBLE_MEDIA_KINDS = ["embedding", "image", "imageToText", "tts", "stt", "webSearch", "webFetch", "video", "music"];
 const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt"];
@@ -42,6 +44,7 @@ export default function Sidebar({ onClose }) {
   const pathname = usePathname();
   const [mediaOpen, setMediaOpen] = useState(false);
   const [showRemoteModal, setShowRemoteModal] = useState(false);
+  const [showChangelogModal, setShowChangelogModal] = useState(false);
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
@@ -59,12 +62,15 @@ export default function Sidebar({ onClose }) {
       .catch(() => {});
   }, []);
 
-  // Lazy check for new npm version on mount
+  // Lazy check for new npm version in background after initial render
   useEffect(() => {
-    fetch("/api/version")
-      .then(res => res.json())
-      .then(data => { if (data.hasUpdate) setUpdateInfo(data); })
-      .catch(() => {});
+    const timer = setTimeout(() => {
+      fetch("/api/version")
+        .then(res => res.json())
+        .then(data => { if (data.hasUpdate) setUpdateInfo(data); })
+        .catch(() => {});
+    }, 2500);
+    return () => clearTimeout(timer);
   }, []);
 
   const isActive = (href) => {
@@ -152,19 +158,14 @@ export default function Sidebar({ onClose }) {
                 </button>
               </div>
               <div className="flex items-center mt-0.5">
-                <a
-                  href={
-                    GITHUB_CONFIG.changelogUrl
-                      ? GITHUB_CONFIG.changelogUrl.replace("raw.githubusercontent.com", "github.com").replace("/refs/heads/", "/blob/")
-                      : "https://github.com/Vanszs/VansRouter/blob/main/CHANGELOG.md"
-                  }
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={() => setShowChangelogModal(true)}
                   className="text-[10px] text-green-600/80 hover:text-green-700 dark:text-amber-500/80 dark:hover:text-amber-400 hover:underline flex items-center gap-1 cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-[12px]">description</span>
                   Check new changelog
-                </a>
+                </button>
               </div>
             </div>
           )}
@@ -347,6 +348,9 @@ export default function Sidebar({ onClose }) {
 
       {/* Remote Promo Modal */}
       <NineRemotePromoModal isOpen={showRemoteModal} onClose={() => setShowRemoteModal(false)} />
+
+      {/* Changelog Modal */}
+      <ChangelogModal isOpen={showChangelogModal} onClose={() => setShowChangelogModal(false)} />
 
       {/* Update Confirmation Modal */}
       <ConfirmModal

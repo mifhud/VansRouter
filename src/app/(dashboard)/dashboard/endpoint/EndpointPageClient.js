@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
-import { fetchCached, invalidateCache } from "@/shared/utils/fetchCache";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
 import {
   WENYAN_LOCALES,
@@ -22,7 +21,7 @@ import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
 import { buildProviderList } from "@/shared/utils/aclProviderList";
-export default function APIPageClient({ machineId }) {
+export default function APIPageClient() {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -447,7 +446,7 @@ export default function APIPageClient({ machineId }) {
   };
 
   // ── ACL Edit Key handlers ──────────────────────────────────────────
-  const ALL_KINDS = ["llm", "embedding", "image", "tts", "stt", "webSearch", "webFetch"];
+  const ALL_KINDS = ["llm", "embedding", "image", "video", "tts", "stt", "webSearch", "webFetch"];
 
   // Provider list for the ACL dialog is built by src/shared/utils/aclProviderList.js
   // (connections + nodes + registered noAuth/free providers). Auth-requiring
@@ -493,6 +492,7 @@ export default function APIPageClient({ machineId }) {
     setEditSaving(true);
     try {
       const body = {
+        name: editName.trim() || editingKey.name || "",
         allowedProviders: editProvidersAll ? null : editProviders,
         allowedCombos: editCombosAll ? null : editCombos,
         allowedKinds: editKindsAll ? null : editKinds,
@@ -917,7 +917,6 @@ export default function APIPageClient({ machineId }) {
 
       if (res.ok) {
         setCreatedKey(data.key);
-        invalidateCache("/api/keys");
         await fetchData();
         setNewKeyName("");
         setShowAddModal(false);
@@ -1234,7 +1233,7 @@ export default function APIPageClient({ machineId }) {
                 message={
                   !requireLogin
                     ? "Require login is disabled — anyone can access your dashboard via tunnel."
-                    : "Dashboard uses the default password — change it in Profile settings."
+                    : "Dashboard is using the new-installation default — change it in Profile settings before exposing access."
                 }
                 action={{
                   label: !requireLogin ? "Enable" : "Change password",
@@ -1320,8 +1319,7 @@ export default function APIPageClient({ machineId }) {
             </p>
           </div>
           <Toggle
-            checked={headroomEnabled && headroomRunning}
-            disabled={!headroomRunning}
+            checked={headroomEnabled}
             onChange={() => handleHeadroomEnabled(!headroomEnabled)}
           />
         </div>
@@ -1709,27 +1707,35 @@ export default function APIPageClient({ machineId }) {
               </label>
             </div>
             {!editProvidersAll && (
-              <div className="max-h-60 overflow-y-auto border border-border-subtle rounded-lg p-2 space-y-1">
-                {providerList.length === 0 ? (
-                  <p className="text-xs text-text-muted p-2">No providers configured.</p>
-                ) : (
-                  providerList.map((p) => {
-                    const checked = editProviders.includes(p.id);
-                    return (
-                      <label key={p.id} className={`flex items-center gap-2 px-2 py-2 rounded text-xs cursor-pointer transition-colors ${checked ? "bg-primary/10 text-primary" : "hover:bg-surface-2"}`}>
-                        <input type="checkbox" checked={checked} onChange={() => toggleEditProvider(p.id)} className="rounded" />
-                        <div className="flex-1 min-w-0">
-                          <span className="font-medium">{p.displayName}</span>
-                          {p.prefix && (
-                            <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-surface-2 text-text-muted font-mono">{p.prefix}</span>
-                          )}
-                        </div>
-                        <span className="text-text-muted text-[10px] shrink-0">{p.count} conn</span>
-                      </label>
-                    );
-                  })
+              <>
+                <div className="max-h-60 overflow-y-auto border border-border-subtle rounded-lg p-2 space-y-1">
+                  {providerList.length === 0 ? (
+                    <p className="text-xs text-text-muted p-2">No providers configured.</p>
+                  ) : (
+                    providerList.map((p) => {
+                      const checked = editProviders.includes(p.id);
+                      return (
+                        <label key={p.id} className={`flex items-center gap-2 px-2 py-2 rounded text-xs cursor-pointer transition-colors ${checked ? "bg-primary/10 text-primary" : "hover:bg-surface-2"}`}>
+                          <input type="checkbox" checked={checked} onChange={() => toggleEditProvider(p.id)} className="rounded" />
+                          <div className="flex-1 min-w-0">
+                            <span className="font-medium">{p.displayName}</span>
+                            {p.prefix && (
+                              <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-surface-2 text-text-muted font-mono">{p.prefix}</span>
+                            )}
+                          </div>
+                          <span className="text-text-muted text-[10px] shrink-0">{p.count} conn</span>
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
+                {editProviders.length === 0 && (
+                  <p className="text-xs text-warning bg-warning/10 border border-warning/20 rounded px-2 py-1 mt-1.5 flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[14px]">warning</span>
+                    <span>Warning: Zero providers selected. This key will have NO access to any providers (Deny All).</span>
+                  </p>
                 )}
-              </div>
+              </>
             )}
             {editProvidersAll && <p className="text-xs text-text-muted">This key can access all providers ({providerList.length}).</p>}
           </div>
@@ -2006,6 +2012,5 @@ export default function APIPageClient({ machineId }) {
     </div>
   );
 }
-
 
 

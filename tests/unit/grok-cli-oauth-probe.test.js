@@ -48,3 +48,25 @@ describe("classifyOAuthProbeResult (grok-cli)", () => {
     expect(r).toEqual({ valid: true, error: null, soft: false });
   });
 });
+
+describe("classifyOAuthProbeResult (freebuff)", () => {
+  const FREEBUFF_PROBE = {
+    acceptStatuses: [403, 404],
+    softFailMessage: { 403: "gated" },
+  };
+
+  it("treats 404 no-session as valid", () => {
+    expect(classifyOAuthProbeResult({ ok: false, status: 404 }, FREEBUFF_PROBE, ""))
+      .toEqual({ valid: true, error: null, soft: false });
+  });
+
+  it("treats 403 gate as soft-valid", () => {
+    const result = classifyOAuthProbeResult({ ok: false, status: 403 }, FREEBUFF_PROBE, "");
+    expect(result).toMatchObject({ valid: true, soft: true, error: "gated" });
+  });
+
+  it("treats 401 as invalid", () => {
+    expect(classifyOAuthProbeResult({ ok: false, status: 401 }, FREEBUFF_PROBE, "unauthorized"))
+      .toEqual({ valid: false, error: "Token invalid or revoked", soft: false });
+  });
+});

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
+import PropTypes from "prop-types";
 import Modal from "./Modal";
 import ProviderIcon from "./ProviderIcon";
 import CapacityBadges from "./CapacityBadges";
@@ -19,6 +20,57 @@ const PROVIDER_ORDER = [
 // Providers that need no auth — always show in model selector
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
 
+// Providers with per-account live catalogs via /api/providers/[id]/models.
+// Static registry stays as fallback when live fetch fails or is empty.
+// zed added in #4244: its backend customResolver already returns live models
+// but the frontend omitted it, hiding Zed entirely from the Combo picker.
+const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "zed"];
+
+// Fetch a provider's account-scoped catalog for every active connection and merge
+// the results. Entries collapse by model id on purpose: two connections of the
+// same provider produce the same picker value (`alias/id`), so keeping the first
+// avoids duplicate rows. There is no per-connection metadata to preserve beyond
+// {id,name}. Empty array means "nothing live" so callers keep the static fallback.
+function useLiveProviderModels(isOpen, connectionIds, label) {
+  const [models, setModels] = useState([]);
+  const idsKey = (connectionIds ?? []).join("|");
+
+  useEffect(() => {
+    const ids = idsKey ? idsKey.split("|") : [];
+    if (!isOpen || ids.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing the list when the modal closes is the point of this effect
+      setModels([]);
+      return undefined;
+    }
+
+    let cancelled = false;
+    Promise.all(ids.map(async (connectionId) => {
+      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
+      if (!response.ok) return [];
+      const data = await response.json();
+      return Array.isArray(data.models) ? data.models : [];
+    }))
+      .then((modelLists) => {
+        if (cancelled) return;
+        const seen = new Set();
+        setModels(modelLists.flat().filter((model) => {
+          if (!model?.id || seen.has(model.id)) return false;
+          seen.add(model.id);
+          return true;
+        }));
+      })
+      .catch((error) => {
+        // Do not hide the static fallback when the account catalog is unavailable.
+        console.warn(`Unable to load ${label} models for selector:`, error);
+        if (!cancelled) setModels([]);
+      });
+
+    return () => { cancelled = true; };
+  }, [isOpen, idsKey, label]);
+
+  return models;
+}
+
 export default function ModelSelectModal({
   isOpen,
   onClose,
@@ -29,6 +81,7 @@ export default function ModelSelectModal({
   title = "Select Model",
   modelAliases = {},
   kindFilter = null,
+  capFilter = null,
   addedModelValues = [],
   closeOnSelect = true,
 }) {
@@ -47,89 +100,94 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
-  const [cursorModels, setCursorModels] = useState([]);
-
-  // Cursor exposes the usable catalog per account. Keep the static catalog only
-  // as a fallback, since it quickly becomes stale and different accounts can
-  // have different model entitlements.
-  const cursorConnectionIds = useMemo(
-    () => activeProviders
-      .filter((provider) => provider.provider === "cursor" && provider.id)
-      .map((provider) => provider.id),
-    [activeProviders],
-  );
-
-  useEffect(() => {
-    if (!isOpen || cursorConnectionIds.length === 0) {
-      // Intentional reset when the modal's external selection changes.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setCursorModels([]);
-      return undefined;
+  // Cursor and Cline expose the usable catalog per account, so the static catalog is
+  // kept only as a fallback: it goes stale quickly and entitlements differ per account.
+  // Single map driven by LIVE_CATALOG_PROVIDERS so the constant cannot drift
+  // from the memos below; per-provider arrays stay referentially stable unless
+  // activeProviders itself changes.
+  const liveConnectionIdsByProvider = useMemo(() => {
+    const map = Object.fromEntries(LIVE_CATALOG_PROVIDERS.map((id) => [id, []]));
+    for (const p of activeProviders) {
+      if (p?.id && Object.prototype.hasOwnProperty.call(map, p.provider)) map[p.provider].push(p.id);
     }
+    return map;
+  }, [activeProviders]);
+  const cursorConnectionIds = liveConnectionIdsByProvider.cursor;
+  const clineConnectionIds = liveConnectionIdsByProvider.cline;
+  const clinepassConnectionIds = liveConnectionIdsByProvider.clinepass;
+  const zedConnectionIds = liveConnectionIdsByProvider.zed;
 
-    let cancelled = false;
-    Promise.all(cursorConnectionIds.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
-    }))
-      .then((modelLists) => {
-        if (cancelled) return;
-        const seen = new Set();
-        setCursorModels(modelLists.flat().filter((model) => {
-          if (!model?.id || seen.has(model.id)) return false;
-          seen.add(model.id);
-          return true;
-        }));
-      })
-      .catch((error) => {
-        // Do not hide the static fallback when the account catalog is unavailable.
-        console.warn("Unable to load Cursor models for selector:", error);
-        if (!cancelled) setCursorModels([]);
-      });
+  const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
+  const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
+  const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
+  const zedModels = useLiveProviderModels(isOpen, zedConnectionIds, "Zed");
 
-    return () => { cancelled = true; };
-  }, [isOpen, cursorConnectionIds]);
+  const fetchCombos = async () => {
+    try {
+      const res = await fetch("/api/combos");
+      if (!res.ok) throw new Error(`Failed to fetch combos: ${res.status}`);
+      const data = await res.json();
+      setCombos(data.combos || []);
+    } catch (error) {
+      console.error("Error fetching combos:", error);
+      setCombos([]);
+    }
+  };
 
   useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    fetch("/api/combos")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => { if (!cancelled) setCombos(data.combos || []); })
-      .catch((err) => { console.error("Error fetching combos:", err); if (!cancelled) setCombos([]); });
-    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load on open; the fetched data is external state
+    if (isOpen) fetchCombos();
   }, [isOpen]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    fetch("/api/provider-nodes")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => { if (!cancelled) setProviderNodes(data.nodes || []); })
-      .catch((err) => { console.error("Error fetching provider nodes:", err); if (!cancelled) setProviderNodes([]); });
-    return () => { cancelled = true; };
-  }, [isOpen]);
+  const fetchProviderNodes = async () => {
+    try {
+      const res = await fetch("/api/provider-nodes");
+      if (!res.ok) throw new Error(`Failed to fetch provider nodes: ${res.status}`);
+      const data = await res.json();
+      setProviderNodes(data.nodes || []);
+    } catch (error) {
+      console.error("Error fetching provider nodes:", error);
+      setProviderNodes([]);
+    }
+  };
 
   useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    fetch("/api/models/custom")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => { if (!cancelled) setCustomModels(data.models || []); })
-      .catch((err) => { console.error("Error fetching custom models:", err); if (!cancelled) setCustomModels([]); });
-    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load on open; the fetched data is external state
+    if (isOpen) fetchProviderNodes();
   }, [isOpen]);
 
+  const fetchCustomModels = async () => {
+    try {
+      const res = await fetch("/api/models/custom");
+      if (!res.ok) throw new Error(`Failed to fetch custom models: ${res.status}`);
+      const data = await res.json();
+      setCustomModels(data.models || []);
+    } catch (error) {
+      console.error("Error fetching custom models:", error);
+      setCustomModels([]);
+    }
+  };
+
   useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    fetch("/api/models/disabled")
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => { if (!cancelled) setDisabledModels(data.disabled || {}); })
-      .catch((err) => { console.error("Error fetching disabled models:", err); if (!cancelled) setDisabledModels({}); });
-    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load on open; the fetched data is external state
+    if (isOpen) fetchCustomModels();
+  }, [isOpen]);
+
+  const fetchDisabledModels = async () => {
+    try {
+      const res = await fetch("/api/models/disabled");
+      if (!res.ok) throw new Error(`Failed to fetch disabled models: ${res.status}`);
+      const data = await res.json();
+      setDisabledModels(data.disabled || {});
+    } catch (error) {
+      console.error("Error fetching disabled models:", error);
+      setDisabledModels({});
+    }
+  };
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load on open; the fetched data is external state
+    if (isOpen) fetchDisabledModels();
   }, [isOpen]);
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
@@ -299,8 +357,9 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const hardcodedModels = providerId === "cursor" && cursorModels.length > 0
-          ? cursorModels
+        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "zed" ? zedModels : [];
+        const hardcodedModels = liveModels.length > 0
+          ? liveModels
           : getModelsByProviderId(providerId);
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
@@ -370,11 +429,11 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
-    if (kindFilter) return [];
+    if (kindFilter || capFilter) return [];
     if (!searchQuery.trim()) return combos;
     const query = searchQuery.toLowerCase();
     return combos.filter(c => c.name.toLowerCase().includes(query));
@@ -394,6 +453,11 @@ export default function ModelSelectModal({
     const filtered = {};
     Object.entries(groupedModels).forEach(([providerId, group]) => {
       let models = group.models;
+      // Filter by input-modality capability (vision/pdf/audioInput/videoInput).
+      if (capFilter) {
+        models = models.filter((m) => getCaps(m.value)?.[capFilter] === true);
+        if (models.length === 0) return;
+      }
       if (query) {
         const providerNameMatches = group.name.toLowerCase().includes(query);
         models = models.filter(
@@ -506,7 +570,7 @@ export default function ModelSelectModal({
             {/* Provider header */}
             <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface py-0.5">
               <ProviderIcon
-                src={`/providers/${providerId}.webp`}
+                src={`/providers/${providerId}.png`}
                 alt={group.name}
                 size={14}
                 fallbackText={(group.name || providerId).slice(0, 2).toUpperCase()}
@@ -583,3 +647,20 @@ export default function ModelSelectModal({
   );
 }
 
+ModelSelectModal.propTypes = {
+  isOpen: PropTypes.bool.isRequired,
+  onClose: PropTypes.func.isRequired,
+  onSelect: PropTypes.func.isRequired,
+  onDeselect: PropTypes.func,
+  selectedModel: PropTypes.string,
+  activeProviders: PropTypes.arrayOf(
+    PropTypes.shape({
+      provider: PropTypes.string.isRequired,
+    })
+  ),
+  title: PropTypes.string,
+  modelAliases: PropTypes.object,
+  kindFilter: PropTypes.string,
+  addedModelValues: PropTypes.arrayOf(PropTypes.string),
+  closeOnSelect: PropTypes.bool,
+};

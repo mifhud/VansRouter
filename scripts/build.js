@@ -18,6 +18,41 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 const { fixStandaloneSymlinks } = require("./fix-standalone-symlinks.cjs");
 
+function backupSqliteFile(dbFile, dest) {
+  const script = [
+    `const dbFile = ${JSON.stringify(dbFile)};`,
+    `const dest = ${JSON.stringify(dest)};`,
+    "const sqlString = (value) => `'${value.replace(/'/g, \"''\")}'`;",
+    "const close = (db) => { try { db?.close(); } catch {} };",
+    "(async () => {",
+    "  let betterSqliteError;",
+    "  try {",
+    "    const Database = require('better-sqlite3');",
+    "    const db = new Database(dbFile, { readonly: true, fileMustExist: true });",
+    "    try { await db.backup(dest); } finally { close(db); }",
+    "    return;",
+    "  } catch (error) {",
+    "    betterSqliteError = error;",
+    "  }",
+    "  try {",
+    "    const { DatabaseSync } = require('node:sqlite');",
+    "    const db = new DatabaseSync(dbFile, { readOnly: true });",
+    "    try { db.exec(`VACUUM INTO ${sqlString(dest)}`); } finally { close(db); }",
+    "  } catch (nodeSqliteError) {",
+    "    console.error(nodeSqliteError.stack || nodeSqliteError);",
+    "    console.error(`better-sqlite3 fallback failed: ${betterSqliteError.message}`);",
+    "    process.exitCode = 1;",
+    "  }",
+    "})();",
+  ].join("\n");
+  try {
+    execFileSync(process.execPath, ["-e", script], { stdio: "inherit", cwd: appDir });
+  } catch (error) {
+    if (error?.status === 1) throw new Error("better-sqlite3 backup failed", { cause: error });
+    throw error;
+  }
+}
+
 const appDir = path.resolve(__dirname, "..");
 const fakeHome = path.join(appDir, ".fakehome");
 
@@ -50,21 +85,32 @@ function backupProductionDb() {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const dest = path.join(backupsDir, `pre-build-${stamp}.sqlite`);
   try {
-    fs.copyFileSync(dbFile, dest);
+    backupSqliteFile(dbFile, dest);
+    for (const name of fs.readdirSync(backupsDir)) {
+      if (name.startsWith("pre-build-") && name.endsWith(".sqlite") && name !== path.basename(dest)) {
+        fs.unlinkSync(path.join(backupsDir, name));
+      }
+    }
     console.log(`▶ DB safety backup: ${dest}`);
   } catch (e) {
-    console.warn(`⚠️  DB backup failed (non-fatal): ${e.message}`);
+    throw new Error(`DB backup failed; refusing to continue build: ${e.message}`, { cause: e });
   }
 }
-backupProductionDb();
-
 // Run focused no-undef lint before building so "X is not defined" runtime
 // crashes are caught early (e.g., GitHub Issue #1, OpenCode CLI setup).
-console.log("▶ running no-undef lint");
-execFileSync(process.execPath, [path.join(appDir, "scripts", "lint-undef.cjs")], {
-  stdio: "inherit",
-  cwd: appDir,
-});
+// It peaks around 1.2 GB, so on a small or shared box it can be OOM-killed and
+// surface as "Next.js build failed" even though Next never started. CI runs
+// `pnpm lint:undef` as its own step; skip the in-build copy with
+// SKIP_PREBUILD_LINT=1 when memory is tight.
+if (process.env.SKIP_PREBUILD_LINT !== "1") {
+  console.log("▶ running no-undef lint");
+  execFileSync(process.execPath, [path.join(appDir, "scripts", "lint-undef.cjs")], {
+    stdio: "inherit",
+    cwd: appDir,
+  });
+} else {
+  console.log("▶ skipping no-undef lint (SKIP_PREBUILD_LINT=1)");
+}
 
 // Empty, junction-free HOME for the build.
 fs.mkdirSync(path.join(fakeHome, "AppData", "Roaming"), { recursive: true });
@@ -86,22 +132,66 @@ const env = {
 // .cmd/shell quoting differences across platforms).
 const nextBin = require.resolve("next/dist/bin/next");
 
+backupProductionDb();
+
 console.log(`▶ next build --webpack  (HOME=${fakeHome})`);
 // execFileSync throws on a non-zero exit, which propagates build failure correctly.
-execFileSync(process.execPath, [nextBin, "build", "--webpack"], {
-  stdio: "inherit",
-  cwd: appDir,
-  env,
-});
+try {
+  execFileSync(process.execPath, [nextBin, "build", "--webpack"], {
+    stdio: "inherit",
+    cwd: appDir,
+    env,
+  });
+} catch (err) {
+  // SIGKILL with no exit status is the kernel OOM killer, not a build error.
+  // Without this the failure reads as a plain Next.js error and sends you
+  // hunting for a regression that does not exist.
+  if (err?.signal === "SIGKILL" && err?.status === null) {
+    console.error("\n✖ next build was OOM-killed (SIGKILL) — it did not fail on its own.");
+    console.error("  Retry with fewer static-generation workers: NEXT_BUILD_CPUS=2 npm run build");
+    console.error("  The no-undef pre-step can also be skipped: SKIP_PREBUILD_LINT=1");
+  }
+  throw err;
+}
 
 // Copy static assets into the standalone output.
 // Respect NEXT_DIST_DIR like next.config.mjs does (used by CLI builds).
 const distDir = process.env.NEXT_DIST_DIR || ".next";
-console.log(`▶ copying public/ + ${distDir}/static into ${distDir}/standalone`);
-fs.cpSync(path.join(appDir, "public"), path.join(appDir, distDir, "standalone", "public"), { recursive: true });
-fs.cpSync(path.join(appDir, distDir, "static"), path.join(appDir, distDir, "standalone", distDir, "static"), { recursive: true });
+const standaloneBaseDir = path.join(appDir, distDir, "standalone");
 
-fixStandaloneSymlinks(path.resolve(__dirname, "..", ".next", "standalone"));
+function resolveStandaloneRoot(baseDir) {
+  if (fs.existsSync(path.join(baseDir, "server.js"))) return baseDir;
+  for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(baseDir, entry.name);
+    if (fs.existsSync(path.join(candidate, "server.js"))) return candidate;
+  }
+  throw new Error(`Next standalone server not found under ${baseDir}`);
+}
+
+const standaloneDir = resolveStandaloneRoot(standaloneBaseDir);
+console.log(`▶ copying public/ + ${distDir}/static into ${standaloneDir}`);
+fs.cpSync(path.join(appDir, "public"), path.join(standaloneDir, "public"), { recursive: true });
+fs.cpSync(path.join(appDir, distDir, "static"), path.join(standaloneDir, distDir, "static"), { recursive: true });
+
+// Bundle Next runtime packages that standalone output omits from top-level
+// node_modules. On POSIX, Next resolves these through intra-release symlinks
+// into .pnpm. On Windows, where junction copies dissolve into directories,
+// Next's internal requires (e.g. @swc/helpers in constants.js, @next/env in config.js)
+// must resolve directly from the release's node_modules.
+const { copyPackageClosure, copyDirectory } = require("./package-closure.cjs");
+const standaloneNodeModules = path.join(standaloneDir, "node_modules");
+for (const pkg of ["@swc/helpers", "@next/env", "react", "react-dom"]) {
+  copyPackageClosure(pkg, {
+    sourceRoots: [appDir],
+    destinationRoot: standaloneNodeModules,
+    copyPackage: copyDirectory,
+  });
+}
+
+fixStandaloneSymlinks(path.resolve(standaloneDir));
+fs.copyFileSync(path.join(appDir, "custom-server.js"), path.join(standaloneDir, "custom-server.js"));
+fs.copyFileSync(path.join(appDir, "runtime-secrets.cjs"), path.join(standaloneDir, "runtime-secrets.cjs"));
 
 // ─── Fix standalone instrumentation import ───────────────────────────────────
 // kimchiQuotaReactivation.js uses `import(/* webpackIgnore: true */ "../../lib/localDb.js")`
@@ -110,7 +200,6 @@ fixStandaloneSymlinks(path.resolve(__dirname, "..", ".next", "standalone"));
 // that doesn't exist because webpack bundles localDb + its deps into server chunks
 // for normal routes, but the webpackIgnore prevents bundling for the instrumentation path.
 // Fix: copy src/lib/ into standalone and create a @/ alias shim so the runtime import resolves.
-const standaloneDir = path.join(appDir, distDir, "standalone");
 const srcLibDir = path.join(appDir, "src", "lib");
 const standaloneSrcLibDir = path.join(standaloneDir, "src", "lib");
 const standaloneNextLibDir = path.join(standaloneDir, distDir, "lib");

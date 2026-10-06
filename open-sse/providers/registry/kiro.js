@@ -15,6 +15,7 @@ export default {
     deprecationNotice: "RISK_NOTICE",
   },
   category: "free",
+  hasFree: true,
   transport: {
     baseUrl: "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
     baseUrls: [
@@ -42,7 +43,13 @@ export default {
     },
   },
   models: [
-    // Opus (added per kiro.dev/changelog/models and kiro.dev/docs/models)
+    // Opus 5.5 — experimental preview, 1M context, 2x credits (#4410)
+    // Announced 2026-09-22; confirmed in kiro.dev session UI.
+    { id: "claude-opus-5.5", name: "Claude Opus 5.5" },
+    { id: "claude-opus-5.5-thinking", name: "Claude Opus 5.5 (Thinking)" },
+    { id: "claude-opus-5.5-agentic", name: "Claude Opus 5.5 (Agentic)" },
+    { id: "claude-opus-5.5-thinking-agentic", name: "Claude Opus 5.5 (Thinking + Agentic)" },
+    // Opus 5
     { id: "claude-opus-5", name: "Claude Opus 5" },
     { id: "claude-opus-5-thinking", name: "Claude Opus 5 (Thinking)" },
     { id: "claude-opus-5-agentic", name: "Claude Opus 5 (Agentic)" },
@@ -116,6 +123,10 @@ export default {
     socialLoginUrl: "https://prod.us-east-1.auth.desktop.kiro.dev/login",
     socialTokenUrl: "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token",
     socialRefreshUrl: "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken",
+    socialClientId: process.env.KIRO_OAUTH_CLIENT_ID || "kiro-cli",
+    socialDeviceAuthorizeUrl:
+      "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/device/authorization",
+    socialDevicePollUrl: "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/device/poll",
     authMethods: [
       "builder-id",
       "idc",

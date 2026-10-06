@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getProviderNodeById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, AI_PROVIDERS } from "@/shared/constants/providers";
-import { getDefaultModel } from "open-sse/config/providerModels.js";
+import { getDefaultModel, getModelUpstreamId } from "open-sse/config/providerModels.js";
 import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS, PROVIDER_OAUTH } from "open-sse/config/providers.js";
 import { getKimchiUserAgent } from "open-sse/utils/kimchiUserAgent.js";
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
@@ -10,6 +10,8 @@ import { normalizeProviderId } from "@/lib/providerNormalization";
 import { cleanCookie } from "open-sse/utils/cookie.js";
 import { validateMuseSparkConnection } from "open-sse/executors/muse-spark-web.js";
 import { validateAgentRouterConnection } from "open-sse/executors/agentrouter.js";
+import { deriveValidateUrl } from "open-sse/providers/schema.js";
+import { ANTHROPIC_API_VERSION } from "open-sse/providers/shared.js";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
 // Returns true if API key is accepted (status !== 401 && !== 403).
@@ -24,7 +26,7 @@ async function probeWebProvider(provider, apiKey) {
   if (!cfg) return null;
   if (cfg.authType === "none") return true; // no-auth (e.g. searxng)
 
-  let url = cfg.baseUrl;
+  let url = cfg.validateUrl || cfg.baseUrl;
   const headers = { "Content-Type": "application/json" };
   let body;
 
@@ -39,11 +41,13 @@ async function probeWebProvider(provider, apiKey) {
 
   // Minimal body for POST endpoints; GET sends nothing
   if (cfg.method === "POST") {
-    body = JSON.stringify({ query: "ping", q: "ping", url: "https://example.com" });
+    body = provider === "exa"
+      ? JSON.stringify({ query: "ping", type: "instant", numResults: 1, contents: { highlights: true } })
+      : JSON.stringify({ query: "ping", q: "ping", url: "https://example.com" });
   }
 
   const res = await fetch(url, { method: cfg.method, headers, body, signal: AbortSignal.timeout(8000) });
-  return res.status !== 401 && res.status !== 403;
+  return res.status !== 401 && res.status !== 403 && res.status !== 402 && res.status !== 429;
 }
 
 // Probe a media provider (tts/embedding/stt/image/video) using *Config.
@@ -167,7 +171,7 @@ export async function POST(request) {
           method: "POST",
           headers: {
             "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
+            "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
             "Authorization": `Bearer ${apiKey}`,
           },
@@ -292,7 +296,7 @@ export async function POST(request) {
             method: "POST",
             headers: {
               "x-api-key": apiKey,
-              "anthropic-version": "2023-06-01",
+              "anthropic-version": ANTHROPIC_API_VERSION,
               "content-type": "application/json",
             },
             body: JSON.stringify({
@@ -342,7 +346,7 @@ export async function POST(request) {
               method: "POST",
               headers: {
                 "x-api-key": apiKey,
-                "anthropic-version": "2023-06-01",
+                "anthropic-version": ANTHROPIC_API_VERSION,
                 "content-type": "application/json",
                 ...(cfg.headers || {}),
               },
@@ -468,20 +472,21 @@ export async function POST(request) {
         }
 
         case "blackbox": {
-          const res = await fetch("https://api.blackbox.ai/chat/completions", {
+          const probeModel = getModelUpstreamId("blackbox", "gpt-5.4") || "blackboxai/openai/gpt-5.4";
+          const res = await fetch("https://api.blackbox.ai/v1/chat/completions", {
             method: "POST",
             headers: {
               "Authorization": `Bearer ${apiKey}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              model: "gpt-4o",
+              model: probeModel,
               messages: [{ role: "user", content: "test" }],
-              max_tokens: 10,
+              max_tokens: 1,
             }),
           });
-          // Returns 401 for invalid key, 200 for valid, 400 for malformed
-          isValid = res.status === 200 || res.status === 400;
+          // Returns 200 for valid, 400 for malformed payload with valid key, 401/403 for invalid
+          isValid = res.ok || res.status === 400;
           break;
         }
 
@@ -630,10 +635,14 @@ export async function POST(request) {
           }
           // Build auth headers based on registry metadata (default: bearer).
           const headers = { "Content-Type": "application/json", ...(cfg.headers || {}) };
-          if (cfg.authHeader === "x-api-key") headers["X-API-Key"] = apiKey;
-          else headers["Authorization"] = `Bearer ${apiKey}`;
+          // Mirror executors/default.js setAuth: registry auth block wins, Bearer default.
+          if (cfg.auth?.header) {
+            headers[cfg.auth.header] = cfg.auth.scheme === "bearer" ? `Bearer ${apiKey}` : apiKey;
+          } else {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+          }
           // Prefer an explicit registry validation URL; derive the common path otherwise.
-          const modelsUrl = cfg.validateUrl || cfg.baseUrl.replace(/\/chat\/completions$/, "/models").replace(/\/chatbot$/, "/models");
+          const modelsUrl = deriveValidateUrl(cfg);
           let probeOk = null;
           try {
             const probeRes = await fetch(modelsUrl, { headers, signal: AbortSignal.timeout(8000) });

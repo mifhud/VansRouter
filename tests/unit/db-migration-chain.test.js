@@ -19,6 +19,7 @@ afterEach(() => {
   // Close adapter to release file handles before rm
   try { global._dbAdapter?.instance?.close?.(); } catch {}
   delete global._dbAdapter;
+  vi.doUnmock("@/lib/db/migrate.js");
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
@@ -122,6 +123,30 @@ describe("Schema migrations", () => {
     expect(parseInt(adapter.get(`SELECT value FROM _meta WHERE key='schemaVersion'`).value, 10)).toBe(8);
     expect(adapter.all(`PRAGMA table_info(combos)`).map((c) => c.name)).toContain("context_length");
     adapter.close();
+  });
+
+  it("getAdapter retries after initialization failure", async () => {
+    let attempts = 0;
+    vi.doMock("@/lib/db/migrate.js", async () => {
+      const actual = await vi.importActual("@/lib/db/migrate.js");
+      return {
+        ...actual,
+        runMigrationOnce: async (adapter) => {
+          attempts += 1;
+          if (attempts === 1) throw new Error("transient initialization failure");
+          return actual.runMigrationOnce(adapter);
+        },
+      };
+    });
+
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    await expect(getAdapter()).rejects.toThrow("transient initialization failure");
+    const db = await getAdapter();
+
+    expect(attempts).toBe(2);
+    expect(db.driver).toBeDefined();
+    expect(db.get("SELECT value FROM _meta WHERE key = 'schemaVersion'")).toBeTruthy();
+    db.close?.();
   });
 
   it("auto-sync re-creates missing index when DB lacks it", async () => {

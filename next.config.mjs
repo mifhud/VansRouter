@@ -1,6 +1,5 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createRequire } from "node:module";
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 // CLI bundling needs workspace root so tracing includes hoisted node_modules (slim ~50MB).
@@ -14,7 +13,10 @@ const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE
 const nextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
   output: "standalone",
-  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite", "dompurify", "chalk"],
+  // Keep `open` external: it derives its own directory from import.meta.url.
+  // Bundling it rewrites that URL to the build machine's path and breaks
+  // Windows/macOS OAuth flows at module load time.
+  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite", "open", "dompurify", "chalk"],
   turbopack: {
     root: tracingRoot
   },
@@ -37,8 +39,13 @@ const nextConfig = {
     serverComponentsHmrCache: true,
     // Tree-shake heavy barrel imports to cut compile + bundle size
     optimizePackageImports: ["@xyflow/react", "@dnd-kit/core", "@dnd-kit/sortable", "material-symbols", "marked"],
+    // Static generation runs one worker per CPU; on a shared or small box the
+    // default is the difference between finishing and being OOM-killed (which
+    // surfaces as "Next.js build failed" even though Next never started).
+    // Unset = Next's default, so CI and release builds are unaffected.
+    ...(process.env.NEXT_BUILD_CPUS ? { cpus: Number(process.env.NEXT_BUILD_CPUS) } : {}),
   },
-  webpack: (config, { isServer }) => {
+  webpack: (config, { isServer, webpack }) => {
     // Ignore fs/path modules in browser bundle
     if (!isServer) {
       config.resolve.fallback = {
@@ -47,20 +54,18 @@ const nextConfig = {
         path: false,
       };
     }
-    // Mark bun: and node:sqlite as ignored — they're runtime-only,
-    // webpack can't bundle them. serverExternalPackages handles named packages
-    // but dynamic `import("bun:sqlite")` / `import("node:sqlite")` still leak
-    // into the client graph. IgnorePlugin via createRequire (webpack is
-    // transitive dep via next, not a direct dep we can ESM-import).
-    // NOTE: only ignore bun:sqlite and node:sqlite — NOT node:fs/node:path
-    // which ARE needed server-side by next/standalone.
-    const require = createRequire(import.meta.url);
-    const webpack = require("webpack");
-    config.plugins = [...(config.plugins || []),
-      new webpack.IgnorePlugin({
+    if (isServer) {
+      // These are runtime built-ins, not npm packages. Keep the imports intact
+      // even when building under a runtime that does not provide both modules.
+      config.externals = [
+        { "bun:sqlite": "commonjs bun:sqlite", "node:sqlite": "commonjs node:sqlite" },
+        ...(Array.isArray(config.externals) ? config.externals : config.externals ? [config.externals] : []),
+      ];
+    } else {
+      config.plugins = [...(config.plugins || []), new webpack.IgnorePlugin({
         resourceRegExp: /^(bun:sqlite|node:sqlite)$/,
-      }),
-    ];
+      })];
+    }
     // Exclude non-source dirs from watcher to reduce inotify load
     config.watchOptions = {
       ...config.watchOptions,
@@ -108,11 +113,38 @@ const nextConfig = {
   async headers() {
     return [
       {
-        // Provider icons (webp), favicons, logos — immutable, hash-stable files.
-        // Browser caches for 1 year; revalidation via Last-Modified/ETag.
+        // Provider icon URLs are stable names, not content hashes. Bound the
+        // cache so replacing an icon does not require a year-long purge.
         source: "/providers/:path*",
         headers: [
-          { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+          { key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=604800" },
+        ],
+      },
+      {
+        // Authenticated HTML must never enter a shared/CDN cache.
+        source: "/dashboard/:path*",
+        headers: [
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
+      {
+        source: "/masuk",
+        headers: [
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
+      {
+        // Keep the public landing document short-lived because it references
+        // release-specific hashed chunks.
+        source: "/landing",
+        headers: [
+          { key: "Cache-Control", value: "public, max-age=0, s-maxage=300, stale-while-revalidate=3600" },
+        ],
+      },
+      {
+        source: "/i18n/:path*",
+        headers: [
+          { key: "Cache-Control", value: "public, max-age=300, stale-while-revalidate=3600" },
         ],
       },
       {

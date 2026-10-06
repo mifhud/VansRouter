@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import "./registerAll.js";
 import { translateRequest, translateResponse } from "../../open-sse/translator/index.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
+import { KIRO_TOOL_RESULTS_PLACEHOLDER } from "../../open-sse/translator/concerns/kiroConversation.js";
 
 const C2K = (body, credentials = null, model = "claude-sonnet-4.5") =>
   translateRequest(FORMATS.CLAUDE, FORMATS.KIRO, model, body, true, credentials, "kiro");
@@ -71,6 +72,43 @@ describe("Claude → Kiro (direct route)", () => {
     expect(cur.userInputMessageContext?.toolResults?.length ?? 0).toBe(0);
   });
 
+  it("uses a neutral placeholder for a tool_result-only user turn", () => {
+    const out = C2K({
+      tools: [{ name: "get_weather", description: "fn", input_schema: { type: "object", properties: {} } }],
+      messages: [
+        { role: "user", content: "Weather in Jakarta?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "Jakarta" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "32C" }] },
+      ],
+    });
+    const cur = out.conversationState.currentMessage.userInputMessage;
+
+    expect(cur.content).toContain(KIRO_TOOL_RESULTS_PLACEHOLDER);
+    expect(cur.content).not.toMatch(/\bcontinue\b/);
+    expect(cur.userInputMessageContext.toolResults).toHaveLength(1);
+  });
+
+  it("keeps real user text when a turn carries both text and tool results", () => {
+    const out = C2K({
+      tools: [{ name: "get_weather", description: "fn", input_schema: { type: "object", properties: {} } }],
+      messages: [
+        { role: "user", content: "Weather in Jakarta?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "Jakarta" } }] },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "32C" },
+            { type: "text", text: "Now answer in one word." },
+          ],
+        },
+      ],
+    });
+    const cur = out.conversationState.currentMessage.userInputMessage;
+
+    expect(cur.content).toContain("Now answer in one word.");
+    expect(cur.content).not.toContain(KIRO_TOOL_RESULTS_PLACEHOLDER);
+  });
+
   it("injects thinking_mode tag when model implies thinking", () => {
     const out = translateRequest(
       FORMATS.CLAUDE,
@@ -81,7 +119,7 @@ describe("Claude → Kiro (direct route)", () => {
       null,
       "kiro"
     );
-    expect(out.systemPrompt).toContain(
+    expect(out.conversationState.currentMessage.userInputMessage.content).toContain(
       "<thinking_mode>enabled</thinking_mode>"
     );
     expect(out.agentMode).toBe("vibe");
@@ -95,7 +133,7 @@ describe("Claude → Kiro (direct route)", () => {
 
     expect(out.additionalModelRequestFields).toBeUndefined();
     expect(out.thinking).toBeUndefined();
-    expect(out.systemPrompt).toContain("<max_thinking_length>24576</max_thinking_length>");
+    expect(out.conversationState.currentMessage.userInputMessage.content).toContain("<max_thinking_length>24576</max_thinking_length>");
   });
 
   it("maps output_config.effort high to Kiro CLI-style additionalModelRequestFields for effort models", () => {
@@ -109,7 +147,7 @@ describe("Claude → Kiro (direct route)", () => {
       output_config: { effort: "high" },
     });
     expect(out.thinking).toBeUndefined();
-    expect(out.systemPrompt).toContain("<max_thinking_length>24576</max_thinking_length>");
+    expect(out.conversationState.currentMessage.userInputMessage.content).toContain("<max_thinking_length>24576</max_thinking_length>");
   });
 
   it("maps Claude-format effort to GPT-5.6 reasoning fields without legacy prompt tags", () => {
@@ -121,8 +159,9 @@ describe("Claude → Kiro (direct route)", () => {
     expect(out.additionalModelRequestFields).toEqual({
       reasoning: { effort: "low" },
     });
-    expect(out.systemPrompt || "").not.toContain("<thinking_mode>");
-    expect(out.systemPrompt || "").not.toContain("<max_thinking_length>");
+    expect(out).not.toHaveProperty("systemPrompt");
+    expect(out.conversationState.currentMessage.userInputMessage.content).not.toContain("<thinking_mode>");
+    expect(out.conversationState.currentMessage.userInputMessage.content).not.toContain("<max_thinking_length>");
   });
 
   it.each(["auto", "minimal", "ultra"])(
@@ -134,8 +173,8 @@ describe("Claude → Kiro (direct route)", () => {
       }, null, "gpt-5.6-sol");
 
       expect(out.additionalModelRequestFields).toBeUndefined();
-      expect(out.systemPrompt).toContain("<thinking_mode>enabled</thinking_mode>");
-      expect(out.systemPrompt).toContain("<max_thinking_length>");
+      expect(out.conversationState.currentMessage.userInputMessage.content).toContain("<thinking_mode>enabled</thinking_mode>");
+      expect(out.conversationState.currentMessage.userInputMessage.content).toContain("<max_thinking_length>");
     }
   );
 
@@ -148,8 +187,9 @@ describe("Claude → Kiro (direct route)", () => {
       }, null, "gpt-5.6-sol");
 
       expect(out.additionalModelRequestFields).toBeUndefined();
-      expect(out.systemPrompt || "").not.toContain("<thinking_mode>");
-      expect(out.systemPrompt || "").not.toContain("<max_thinking_length>");
+      expect(out).not.toHaveProperty("systemPrompt");
+      expect(out.conversationState.currentMessage.userInputMessage.content).not.toContain("<thinking_mode>");
+      expect(out.conversationState.currentMessage.userInputMessage.content).not.toContain("<max_thinking_length>");
     }
   );
 
@@ -171,7 +211,7 @@ describe("Claude → Kiro (direct route)", () => {
       messages: [{ role: "user", content: "hello" }],
     });
 
-    expect(out.systemPrompt).toContain("system-only instruction");
+    expect(out).not.toHaveProperty("systemPrompt");
     expect(out.conversationState.currentMessage.userInputMessage.content).toContain("system-only instruction");
   });
 
@@ -185,8 +225,8 @@ describe("Claude → Kiro (direct route)", () => {
       messages: [{ role: "user", content: "second" }],
     });
 
-    expect(first.systemPrompt).toBe(second.systemPrompt);
-    expect(first.systemPrompt).not.toContain("Current time");
+    expect(first).not.toHaveProperty("systemPrompt");
+    expect(second).not.toHaveProperty("systemPrompt");
     expect(first.conversationState.currentMessage.userInputMessage.content).toContain("Current time");
   });
 });

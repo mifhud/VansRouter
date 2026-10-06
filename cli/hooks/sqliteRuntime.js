@@ -6,11 +6,16 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const BETTER_SQLITE3_VERSION = "12.6.2";
+const [NODE_MAJOR] = process.versions.node.split(".").map(Number);
+const USE_NAPI_BUILD = NODE_MAJOR >= 22;
+const BETTER_SQLITE3_VERSION = USE_NAPI_BUILD ? "13.0.3" : "12.6.2";
 const SQL_JS_VERSION = "1.14.1";
 
 function getDataDir() {
-  if (process.env.DATA_DIR) return process.env.DATA_DIR;
+  const configured = (process.env.DATA_DIR || "").trim();
+  // A Docker/Linux DATA_DIR copied into a Windows .env is not valid here; fall
+  // back to the platform default instead of provisioning into a phantom root.
+  if (configured && !(process.platform === "win32" && /^\//.test(configured))) return configured;
   return process.platform === "win32"
     ? path.join(process.env.APPDATA || os.homedir(), "9router")
     : path.join(os.homedir(), ".9router");
@@ -45,9 +50,23 @@ function hasModule(name) {
   return fs.existsSync(path.join(getRuntimeNodeModules(), name, "package.json"));
 }
 
+function isGlibcRuntime() {
+  try { return Boolean(process.report?.getReport()?.header?.glibcVersionRuntime); } catch { return true; }
+}
+
+// 12.x compiles/downloads into build/Release; 13.x ships prebuilds/<platform>-<arch>.node.
+function getBetterSqliteBinary() {
+  const root = path.join(getRuntimeNodeModules(), "better-sqlite3");
+  const platform = process.platform === "linux" && !isGlibcRuntime() ? "linuxmusl" : process.platform;
+  return [
+    path.join(root, "build", "Release", "better_sqlite3.node"),
+    path.join(root, "prebuilds", `${platform}-${process.arch}.node`),
+  ].find((file) => fs.existsSync(file));
+}
+
 function isBetterSqliteBinaryValid() {
-  const binary = path.join(getRuntimeNodeModules(), "better-sqlite3", "build", "Release", "better_sqlite3.node");
-  if (!fs.existsSync(binary)) return false;
+  const binary = getBetterSqliteBinary();
+  if (!binary) return false;
   try {
     const fd = fs.openSync(binary, "r");
     const buf = Buffer.alloc(4);
@@ -91,6 +110,7 @@ function runNpmInstall({ cwd, pkgs, extraArgs = [], timeout = 180000 }) {
 function npmInstall(pkgs, opts = {}) {
   const cwd = ensureRuntimeDir();
   const extra = opts.optional ? ["--no-save"] : [];
+  if (opts.ignoreScripts) extra.push("--ignore-scripts");
   if (!opts.silent) console.log("⏳ Installing SQLite engine (first run)...");
   const res = runNpmInstall({ cwd, pkgs, extraArgs: extra, timeout: opts.timeout || 180000 });
   if (!res.ok && !opts.silent) {
@@ -108,10 +128,18 @@ function npmInstall(pkgs, opts = {}) {
 // built-in. This is purely a *speed optimization* — app works without
 // better-sqlite3 via fallbacks.
 function isSqlJsWasmValid() {
-  const bundledWasm = path.join(__dirname, "..", "app", "node_modules", "sql.js", "dist", "sql-wasm.wasm");
-  if (fs.existsSync(bundledWasm)) return true;
+  const appDir = path.join(__dirname, "..", "app");
+  const bundledWasmPaths = getBundledWasmPaths(appDir);
+  if (bundledWasmPaths.some((file) => fs.existsSync(file))) return true;
   const runtimeWasm = path.join(getRuntimeNodeModules(), "sql.js", "dist", "sql-wasm.wasm");
   return fs.existsSync(runtimeWasm);
+}
+
+function getBundledWasmPaths(appDir = path.join(__dirname, "..", "app")) {
+  return [
+    path.join(appDir, "_nm", "sql.js", "dist", "sql-wasm.wasm"),
+    path.join(appDir, "node_modules", "sql.js", "dist", "sql-wasm.wasm"),
+  ];
 }
 
 function ensureSqliteRuntime({ silent = false } = {}) {
@@ -129,7 +157,7 @@ function ensureSqliteRuntime({ silent = false } = {}) {
     return { betterSqlite: true, sqlJs: sqlJsOk };
   }
 
-  const ok = npmInstall([`better-sqlite3@${BETTER_SQLITE3_VERSION}`], { optional: true, silent });
+  const ok = npmInstall([`better-sqlite3@${BETTER_SQLITE3_VERSION}`], { optional: true, silent, ignoreScripts: USE_NAPI_BUILD });
   return {
     betterSqlite: ok && hasModule("better-sqlite3") && isBetterSqliteBinaryValid(),
     sqlJs: sqlJsOk,
@@ -137,12 +165,19 @@ function ensureSqliteRuntime({ silent = false } = {}) {
 }
 
 // Inject runtime + bundled node_modules into NODE_PATH so child Node processes
-// resolve sql.js (bundled in bin/app/node_modules) and better-sqlite3 (runtime).
+// resolve sql.js (bundled in bin/app/_nm) and better-sqlite3 (runtime).
 function buildEnvWithRuntime(baseEnv = process.env) {
   const runtimeNm = getRuntimeNodeModules();
-  const bundledNm = path.join(__dirname, "..", "app", "node_modules");
+  const appDir = path.join(__dirname, "..", "app");
+  const bundledNm = fs.existsSync(path.join(appDir, "_nm"))
+    ? path.join(appDir, "_nm")
+    : path.join(appDir, "node_modules");
   const existing = baseEnv.NODE_PATH || "";
-  const NODE_PATH = [runtimeNm, bundledNm, existing].filter(Boolean).join(path.delimiter);
+  const bundledIsValid = getBundledWasmPaths(appDir).some((file) => fs.existsSync(file));
+  const NODE_PATH = [
+    ...(bundledIsValid ? [bundledNm, runtimeNm] : [runtimeNm, bundledNm]),
+    existing,
+  ].filter(Boolean).join(path.delimiter);
   return { ...baseEnv, NODE_PATH };
 }
 

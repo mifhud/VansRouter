@@ -1,8 +1,10 @@
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelKind } from "@/shared/constants/models";
 import {
+  ALIAS_TO_ID,
   AI_PROVIDERS,
   FREE_PROVIDERS,
   getProviderAlias,
+  getProviderByAlias,
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
@@ -24,14 +26,17 @@ import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { aggregateComboCapabilities } from "open-sse/services/combo.js";
 import { guardedFetch } from "@/shared/utils/ssrfGuard.js";
+import { ANTHROPIC_API_VERSION } from "open-sse/providers/shared.js";
 
 const UPSTREAM_CONNECTION_RE = /[-_][0-9a-f]{8,}$/i;
 const LLM_KIND = "llm";
-const ALL_KINDS = [LLM_KIND, "tts", "embedding", "image", "imageToText", "stt", "webSearch", "webFetch"];
+const ALL_KINDS = [LLM_KIND, "tts", "embedding", "image", "imageToText", "stt", "video", "webSearch", "webFetch"];
 
 const MODEL_TYPE_TO_KIND = {
   image: "image",
+  video: "video",
   tts: "tts",
   embedding: "embedding",
   stt: "stt",
@@ -122,6 +127,74 @@ function modelKind(model) {
   return MODEL_TYPE_TO_KIND[k] || LLM_KIND;
 }
 
+function appendConfiguredMediaModels(entries, providerInfo, alias, kindFilter, isDisabled = () => false) {
+  if (!providerInfo || !alias) return;
+
+  if (kindFilter.has("tts")) {
+    if (Array.isArray(providerInfo.ttsConfig?.models)) {
+      for (const m of providerInfo.ttsConfig.models) {
+        if (m?.id && !isDisabled(alias, m.id)) {
+          entries.push({ id: `${alias}/${m.id}`, object: "model", kind: "tts", owned_by: alias });
+        }
+      }
+    } else if (providerInfo.ttsConfig) {
+      entries.push({ id: `${alias}/tts`, object: "model", kind: "tts", owned_by: alias });
+    }
+  }
+
+  if (kindFilter.has("stt")) {
+    if (Array.isArray(providerInfo.sttConfig?.models)) {
+      for (const m of providerInfo.sttConfig.models) {
+        if (m?.id && !isDisabled(alias, m.id)) {
+          entries.push({ id: `${alias}/${m.id}`, object: "model", kind: "stt", owned_by: alias });
+        }
+      }
+    } else if (providerInfo.sttConfig) {
+      entries.push({ id: `${alias}/stt`, object: "model", kind: "stt", owned_by: alias });
+    }
+  }
+
+  if (kindFilter.has("image") && Array.isArray(providerInfo.imageConfig?.models)) {
+    for (const m of providerInfo.imageConfig.models) {
+      if (m?.id && !isDisabled(alias, m.id)) {
+        entries.push({ id: `${alias}/${m.id}`, object: "model", kind: "image", owned_by: alias });
+      }
+    }
+  }
+
+  if (kindFilter.has("embedding") && Array.isArray(providerInfo.embeddingConfig?.models)) {
+    for (const m of providerInfo.embeddingConfig.models) {
+      if (m?.id && !isDisabled(alias, m.id)) {
+        entries.push({ id: `${alias}/${m.id}`, object: "model", kind: "embedding", owned_by: alias });
+      }
+    }
+  }
+
+  if (kindFilter.has("webSearch") && (providerInfo.searchConfig || providerInfo.searchViaChat || providerInfo.serviceKinds?.includes("webSearch"))) {
+    entries.push({ id: `${alias}/search`, object: "model", kind: "webSearch", owned_by: alias });
+  }
+
+  if (kindFilter.has("webFetch") && (providerInfo.fetchConfig || providerInfo.serviceKinds?.includes("webFetch"))) {
+    entries.push({ id: `${alias}/fetch`, object: "model", kind: "webFetch", owned_by: alias });
+  }
+}
+
+export function isConfiguredMediaModel(alias, modelId) {
+  const provider = getProviderByAlias(alias);
+  if (!provider) return false;
+  if (modelId === "search" && (provider.searchConfig || provider.searchViaChat || provider.serviceKinds?.includes("webSearch"))) return true;
+  if (modelId === "fetch" && (provider.fetchConfig || provider.serviceKinds?.includes("webFetch"))) return true;
+  if (modelId === "stt" && (provider.sttConfig || provider.serviceKinds?.includes("stt"))) return true;
+  if (modelId === "tts" && (provider.ttsConfig || provider.serviceKinds?.includes("tts"))) return true;
+  if (modelId === "image" && (provider.imageConfig || provider.serviceKinds?.includes("image"))) return true;
+  if (modelId === "video" && (provider.videoConfig || provider.serviceKinds?.includes("video"))) return true;
+  if (provider.ttsConfig?.models?.some((m) => m.id === modelId)) return true;
+  if (provider.sttConfig?.models?.some((m) => m.id === modelId)) return true;
+  if (provider.imageConfig?.models?.some((m) => m.id === modelId)) return true;
+  if (provider.embeddingConfig?.models?.some((m) => m.id === modelId)) return true;
+  return false;
+}
+
 function inferKindFromUnknownModelId(modelId) {
   const lower = String(modelId).toLowerCase();
   if (/embed/.test(lower)) return "embedding";
@@ -143,9 +216,66 @@ function comboMatchesKinds(combo, kindFilter) {
   return kindFilter.has(kind);
 }
 
+// Combo seats use UI aliases; the model registry also has transport aliases.
+// Capability overrides and catalog limits are keyed by provider id.
+const ALIAS_TO_PROVIDER_ID = {
+  ...Object.fromEntries(
+    Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id])
+  ),
+  ...ALIAS_TO_ID,
+};
+
+function comboSeatCapabilities(seat) {
+  const slash = seat.indexOf("/");
+  if (slash <= 0) return null;
+  const alias = seat.slice(0, slash);
+  return getCapabilitiesForModel(ALIAS_TO_PROVIDER_ID[alias] || alias, seat.slice(slash + 1));
+}
+
+// Nested combo names are valid seats — the model selector exposes them and
+// chat routing resolves them recursively — but a no-slash seat is otherwise
+// treated as a literal model and publishes the 200k floor. Expand nested
+// names (cycle-guarded) so the published window is the true min across the
+// whole chain.
+function comboSeatLimits(combo, combosByName, visiting = new Set()) {
+  const name = typeof combo?.name === "string" ? combo.name : null;
+  if (name) {
+    if (visiting.has(name)) return { contextWindow: undefined, maxOutput: undefined };
+    visiting.add(name);
+  }
+  let contextWindow = Infinity;
+  let maxOutput = Infinity;
+  try {
+    for (const seat of Array.isArray(combo?.models) ? combo.models : []) {
+      if (typeof seat !== "string") continue;
+      const slash = seat.indexOf("/");
+      if (slash <= 0) {
+        const nested = combosByName.get(seat);
+        if (nested) {
+          const nestedLimits = comboSeatLimits(nested, combosByName, visiting);
+          if (Number.isFinite(nestedLimits.contextWindow)) contextWindow = Math.min(contextWindow, nestedLimits.contextWindow);
+          if (Number.isFinite(nestedLimits.maxOutput)) maxOutput = Math.min(maxOutput, nestedLimits.maxOutput);
+          continue;
+        }
+      }
+      const caps = comboSeatCapabilities(seat) || getCapabilitiesForModel(null, seat);
+      if (Number.isFinite(caps?.contextWindow)) contextWindow = Math.min(contextWindow, caps.contextWindow);
+      if (Number.isFinite(caps?.maxOutput)) maxOutput = Math.min(maxOutput, caps.maxOutput);
+    }
+  } finally {
+    if (name) visiting.delete(name);
+  }
+  return {
+    contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
+    maxOutput: Number.isFinite(maxOutput) ? maxOutput : undefined,
+  };
+}
+
 let _modelsFetcherCache = {};
 let _modelsFetcherCacheExpiry = {};
 const MODELS_FETCHER_CACHE_TTL_MS = 300000;
+const _liveModelsCache = new Map();
+const LIVE_MODELS_CACHE_TTL_MS = 300000;
 
 export async function fetchModelsFetcherIds(providerId, providerInfo) {
   const fetcher = providerInfo?.modelsFetcher;
@@ -166,7 +296,9 @@ export async function fetchModelsFetcherIds(providerId, providerInfo) {
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
-    if (!response.ok) return [];
+    if (!response.ok) {
+      return _modelsFetcherCacheExpiry[providerId] > now ? _modelsFetcherCache[providerId] : [];
+    }
 
     const data = await response.json();
     let rawModels;
@@ -176,6 +308,8 @@ export async function fetchModelsFetcherIds(providerId, providerInfo) {
       rawModels = data.data;
     } else if (data?.models && typeof data.models === "object" && !Array.isArray(data.models)) {
       rawModels = Object.values(data.models);
+    } else if (Array.isArray(data?.results)) {
+      rawModels = data.results;
     } else if (data && typeof data === "object") {
       const providerKey = providerInfo?.id || providerId;
       const aliasKey = providerInfo?.alias || providerInfo?.uiAlias;
@@ -244,7 +378,7 @@ async function fetchCompatibleModelIds(connection) {
       url = `${url.slice(0, -9)}/models`;
     }
     headers["x-api-key"] = connection.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-version"] = ANTHROPIC_API_VERSION;
     headers.Authorization = `Bearer ${connection.apiKey}`;
   } else {
     return [];
@@ -314,11 +448,28 @@ async function buildAllModelEntries(kindFilter, combos, customModels, modelAlias
   kindFilter = new Set(kindFilter);
   const entries = [];
 
+  const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
+  // Nested combo names are valid seats; keep the records (not just the member
+  // lists) so comboSeatLimits can expand them.
+  const combosByName = new Map(
+    combos.filter((c) => typeof c?.name === "string").map((c) => [c.name, c]),
+  );
+
   for (const combo of combos) {
     if (!comboMatchesKinds(combo, kindFilter)) continue;
     const entry = { id: `combo/${combo.name}`, object: "model", owned_by: "combo" };
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
+    } else {
+      const comboCaps = aggregateComboCapabilities(combo.models, comboByName, comboSeatCapabilities);
+      if (comboCaps) entry.capabilities = comboCaps;
+      // Any seat can serve the request, so the only window a combo can promise is
+      // its smallest. Combo entries were the only models on this endpoint that
+      // published no limits at all, which leaves a client to guess from the name —
+      // and it guesses high (see the snake_case note on the per-provider path).
+      const { contextWindow, maxOutput } = comboSeatLimits(combo, combosByName);
+      if (Number.isFinite(contextWindow)) entry.context_length = contextWindow;
+      if (Number.isFinite(maxOutput)) entry.max_completion_tokens = maxOutput;
     }
     entries.push(entry);
   }
@@ -333,8 +484,18 @@ async function buildAllModelEntries(kindFilter, combos, customModels, modelAlias
       for (const model of providerModels) {
         if (!kindFilter.has(modelKind(model))) continue;
         if (isDisabled(alias, model.id)) continue;
-        entries.push({ id: `${alias}/${model.id}`, object: "model", owned_by: alias });
+        entries.push({
+          id: `${alias}/${model.id}`,
+          object: "model",
+          owned_by: alias,
+          capabilities: getCapabilitiesForModel(providerId, model.id),
+        });
       }
+    }
+    for (const [providerId, providerInfo] of Object.entries(AI_PROVIDERS)) {
+      if (!providerMatchesKinds(providerId, kindFilter)) continue;
+      const alias = getProviderAlias(providerId) || providerInfo.alias || providerId;
+      appendConfiguredMediaModels(entries, providerInfo, alias, kindFilter, isDisabled);
     }
     for (const customModel of customModels) {
       if (!customModel?.id || (customModel.type && customModel.type !== "llm")) continue;
@@ -362,7 +523,11 @@ async function buildAllModelEntries(kindFilter, combos, customModels, modelAlias
   }
 
   const noAuthProviders = Object.entries(AI_PROVIDERS).filter(([providerId, providerInfo]) =>
-    !activeConnectionByProvider.has(providerId) && providerInfo.noAuth && providerMatchesKinds(providerId, kindFilter)
+    !activeConnectionByProvider.has(providerId) && providerMatchesKinds(providerId, kindFilter) && (
+      providerInfo.noAuth ||
+      (kindFilter.has("webSearch") && (providerInfo.searchConfig || providerInfo.searchViaChat)) ||
+      (kindFilter.has("webFetch") && providerInfo.fetchConfig)
+    )
   );
   const noAuthResults = await Promise.allSettled(
     noAuthProviders.map(([providerId, providerInfo]) =>
@@ -424,14 +589,33 @@ async function buildConnectedProviderIds(providerId, conn, kindFilter, customMod
     try {
       const live = await liveResolver(conn);
       if (live?.models?.length) {
-        rawModelIds = live.models.map((m) => m.id);
+        const liveIds = live.models
+          .map((m) => m.id)
+          .filter((id) => typeof id === "string" && id.trim() !== "");
+        rawModelIds = Array.from(new Set([...rawModelIds, ...liveIds]));
         for (const m of live.models) {
           if (m.id && m.capabilities) liveCapabilitiesById.set(m.id, m.capabilities);
         }
         liveKind = live.kind || null;
+        _liveModelsCache.set(`${providerId}:${conn.id}`, {
+          models: live.models,
+          kind: liveKind,
+          expiresAt: Date.now() + LIVE_MODELS_CACHE_TTL_MS,
+        });
       }
     } catch (err) {
       console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
+      const cachedLive = _liveModelsCache.get(`${providerId}:${conn.id}`);
+      if (cachedLive?.expiresAt > Date.now()) {
+        rawModelIds = Array.from(new Set([
+          ...rawModelIds,
+          ...cachedLive.models.map((m) => m.id).filter((id) => typeof id === "string" && id.trim() !== ""),
+        ]));
+        for (const m of cachedLive.models) {
+          if (m.id && m.capabilities) liveCapabilitiesById.set(m.id, m.capabilities);
+        }
+        liveKind = cachedLive.kind;
+      }
     }
   }
 
@@ -492,26 +676,7 @@ async function buildConnectedProviderIds(providerId, conn, kindFilter, customMod
     entries.push(entry);
   }
 
-  if (kindFilter.has("tts") && Array.isArray(providerInfo?.ttsConfig?.models)) {
-    for (const m of providerInfo.ttsConfig.models) {
-      if (m?.id && !isDisabled(outputAlias, m.id) && !isDisabled(staticAlias, m.id)) {
-        entries.push({ id: `${outputAlias}/${m.id}`, object: "model", owned_by: outputAlias });
-      }
-    }
-  }
-  if (kindFilter.has("embedding") && Array.isArray(providerInfo?.embeddingConfig?.models)) {
-    for (const m of providerInfo.embeddingConfig.models) {
-      if (m?.id && !isDisabled(outputAlias, m.id) && !isDisabled(staticAlias, m.id)) {
-        entries.push({ id: `${outputAlias}/${m.id}`, object: "model", owned_by: outputAlias });
-      }
-    }
-  }
-  if (kindFilter.has("webSearch") && providerInfo?.searchConfig) {
-    entries.push({ id: `${outputAlias}/search`, object: "model", kind: "webSearch", owned_by: outputAlias });
-  }
-  if (kindFilter.has("webFetch") && providerInfo?.fetchConfig) {
-    entries.push({ id: `${outputAlias}/fetch`, object: "model", kind: "webFetch", owned_by: outputAlias });
-  }
+  appendConfiguredMediaModels(entries, providerInfo, outputAlias, kindFilter, (alias, id) => isDisabled(outputAlias, id) || isDisabled(staticAlias, id));
 
   return entries;
 }
@@ -556,26 +721,7 @@ async function buildFreeProviderIds(providerId, providerInfo, kindFilter, custom
     entries.push({ id: `${outputAlias}/${modelId}`, object: "model", owned_by: outputAlias });
   }
 
-  if (kindFilter.has("tts") && Array.isArray(providerInfo?.ttsConfig?.models)) {
-    for (const m of providerInfo.ttsConfig.models) {
-      if (m?.id && !isDisabled(outputAlias, m.id)) {
-        entries.push({ id: `${outputAlias}/${m.id}`, object: "model", owned_by: outputAlias });
-      }
-    }
-  }
-  if (kindFilter.has("embedding") && Array.isArray(providerInfo?.embeddingConfig?.models)) {
-    for (const m of providerInfo.embeddingConfig.models) {
-      if (m?.id && !isDisabled(outputAlias, m.id)) {
-        entries.push({ id: `${outputAlias}/${m.id}`, object: "model", owned_by: outputAlias });
-      }
-    }
-  }
-  if (kindFilter.has("webSearch") && providerInfo?.searchConfig) {
-    entries.push({ id: `${outputAlias}/search`, object: "model", kind: "webSearch", owned_by: outputAlias });
-  }
-  if (kindFilter.has("webFetch") && providerInfo?.fetchConfig) {
-    entries.push({ id: `${outputAlias}/fetch`, object: "model", kind: "webFetch", owned_by: outputAlias });
-  }
+  appendConfiguredMediaModels(entries, providerInfo, outputAlias, kindFilter, isDisabled);
 
   return entries;
 }
@@ -608,6 +754,11 @@ export async function buildModelsList(kindFilter, options = {}) {
     };
     if (entry.kind) model.kind = entry.kind;
     if (entry.capabilities) model.capabilities = entry.capabilities;
+    const caps = entry.capabilities || {};
+    if (entry.kind === "llm" || !entry.kind) {
+      if (Number.isFinite(caps.contextWindow)) model.context_length = caps.contextWindow;
+      if (Number.isFinite(caps.maxOutput)) model.max_completion_tokens = caps.maxOutput;
+    }
     dedupedModels.push(model);
   }
 
@@ -667,6 +818,16 @@ export function invalidateAllowedModelsCache() {
 export async function isModelAllowed(modelStr, apiKeyInfo = null) {
   if (!apiKeyInfo) return true;
   const allowed = await getAllowedModelIds();
-  return allowed.has(modelStr);
+  if (allowed.has(modelStr)) return true;
+
+  // Virtual and config-defined endpoints for media kinds (webSearch, webFetch, stt, tts, image, embedding)
+  if (typeof modelStr === "string" && modelStr.includes("/")) {
+    const slash = modelStr.indexOf("/");
+    const alias = modelStr.slice(0, slash);
+    const modelId = modelStr.slice(slash + 1);
+    return isConfiguredMediaModel(alias, modelId);
+  }
+
+  return false;
 }
 

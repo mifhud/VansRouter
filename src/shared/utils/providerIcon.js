@@ -5,6 +5,12 @@ const ICON_ALIASES = {
   "perplexity-agent": "perplexity",
   "gitlab-duo": "gitlab",
   "vercel-ai-gateway": "vercel",
+  "perplexing": "perplexity",
+  "kilo": "kilocode",
+  "kilo-gateway": "kilocode",
+  "codebuddy-intl": "codebuddy-cn",
+  "alims-intl": "alicode-intl",
+  "qoder-cn": "qoder",
 };
 
 // Runtime only — first 404 remembers id for the whole session
@@ -66,7 +72,7 @@ const POPULAR_PROVIDERS = [
 /** Non-blocking background preloader for provider icon webp images */
 export function preloadProviderIcons(providerIds = POPULAR_PROVIDERS) {
   if (typeof window === "undefined") return;
-  const schedule = window.requestIdleCallback || ((cb) => setTimeout(cb, 200));
+  const schedule = window.requestIdleCallback || ((cb) => setTimeout(cb, 1000));
   schedule(() => {
     for (const pId of providerIds) {
       const src = getProviderIconSrc(pId);
@@ -75,6 +81,6 @@ export function preloadProviderIcons(providerIds = POPULAR_PROVIDERS) {
         img.src = src;
       }
     }
-  });
+  }, { timeout: 2000 });
 }
 

@@ -15,6 +15,7 @@
  */
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
+import { restoreToolName } from "../concerns/toolCall.js";
 
 function stopThinkingBlock(state, results) {
   if (!state.thinkingBlockStarted) return;
@@ -46,6 +47,7 @@ function convertFinishReason(reason) {
  * Convert one OpenAI-format chunk (from KiroExecutor) into Claude SSE events.
  * Returns an array of Claude events, or null when the chunk yields nothing.
  */
+
 export function kiroToClaudeResponse(chunk, state) {
   // KiroExecutor emits chat.completion.chunk objects; tolerate string chunks
   // by attempting a parse (defensive — the direct path is always objects).
@@ -75,6 +77,10 @@ export function kiroToClaudeResponse(chunk, state) {
         ? data.usage.completion_tokens
         : 0;
     state.usage = { input_tokens: promptTokens, output_tokens: outputTokens };
+    const cacheRead = data.usage.cache_read_input_tokens ?? data.usage.prompt_tokens_details?.cached_tokens;
+    const cacheCreation = data.usage.cache_creation_input_tokens ?? data.usage.prompt_tokens_details?.cache_creation_tokens;
+    if (typeof cacheRead === "number") state.usage.cache_read_input_tokens = cacheRead;
+    if (typeof cacheCreation === "number") state.usage.cache_creation_input_tokens = cacheCreation;
   }
 
   // First chunk → emit message_start.
@@ -152,7 +158,7 @@ export function kiroToClaudeResponse(chunk, state) {
         const toolBlockIndex = state.nextBlockIndex++;
         state.toolCalls.set(idx, {
           id: tc.id,
-          name: tc.function?.name || "",
+          name: restoreToolName(state, tc.function?.name),
           blockIndex: toolBlockIndex,
         });
         results.push({
@@ -161,7 +167,7 @@ export function kiroToClaudeResponse(chunk, state) {
           content_block: {
             type: "tool_use",
             id: tc.id,
-            name: tc.function?.name || "",
+            name: restoreToolName(state, tc.function?.name),
             input: {},
           },
         });
@@ -237,7 +243,7 @@ export function kiroToClaudeNonStreaming(data) {
       content.push({
         type: "tool_use",
         id: tc.id || `toolu_${Date.now()}`,
-        name: tc.function?.name || "",
+        name: restoreToolName(data, tc.function?.name),
         input,
       });
     }

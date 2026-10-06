@@ -83,6 +83,7 @@ import p81 from "./ollama.js";
 import p82 from "./openai.js";
 import p83 from "./opencode-go.js";
 import p84 from "./opencode.js";
+import p84z from "./opencode-zen.js";
 import p85 from "./openrouter.js";
 import p86 from "./ovhcloud.js";
 import p87 from "./perplexity-agent.js";
@@ -138,7 +139,33 @@ import p136 from "./llm7.js";
 import p137 from "./morph.js";
 import p138 from "./tencent.js";
 import p139 from "./freebuff.js";
+import p140 from "./fish-audio.js";
+import p141 from "./alitp-intl.js";
+import p142 from "./xquik.js";
+import p143 from "./ollama-search.js";
+import p144 from "./zed.js";
+import p145 from "./selfhosted-embedding.js";
+import p146 from "./selfhosted-stt.js";
+import p147 from "./selfhosted-tts.js";
+import p148 from "./qoder-cn.js";
+import p149 from "./tokenharbor.js";
+import p150 from "./meta.js";
+import p151 from "./hive.js";
+import p152 from "./dahl.js";
+import p153 from "./atria.js";
+import p154 from "./agnes.js";
+import p155 from "./bai.js";
+import p156 from "./tinyfish.js";
+import p157 from "./muse.js";
+import p158 from "./v1m.js";
 
+// Auto-generated: static imports for all registry entries
+import p68z from "./opencode-zen.js";
+// Temporarily hidden — no tool calling support (trae SOLO agent / windsurf gRPC skip ToolCallChunk).
+// Re-enable by uncommenting both the import and the array entry below.
+// import p102 from "./trae.js";
+// import p114 from "./devin-cli.js";
+// import p104 from "./windsurf.js";
 export default [
   p0,
   p1,
@@ -225,6 +252,7 @@ export default [
   p82,
   p83,
   p84,
+  p84z,
   p85,
   p86,
   p87,
@@ -279,5 +307,24 @@ export default [
   p136,
   p137,
   p138,
-  p139
+  p139,
+  p140,
+  p141,
+  p142,
+  p143,
+  p144,
+  p145,
+  p146,
+  p147,
+  p148,
+  p149,
+  p150,
+  p151,
+  p152,
+  p153,
+  p154,
+  p155,
+  p156,
+  p157,
+  p158
 ];

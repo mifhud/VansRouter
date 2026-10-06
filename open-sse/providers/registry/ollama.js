@@ -2,6 +2,7 @@ export default {
   id: "ollama",
   priority: 30,
   hasFree: true,
+  freeRefresh: "monthly",
   alias: "ollama",
   display: {
     name: "Ollama Cloud",
@@ -28,9 +29,11 @@ export default {
     { id: "glm-4.7-flash", name: "GLM 4.7 Flash" },
     { id: "qwen3.5", name: "Qwen3.5" },
     { id: "minimax-m3", name: "MiniMax M3" },
+    { id: "deepseek-v4.1-flash:cloud", name: "DeepSeek V4.1 Flash" },
   ],
   serviceKinds: ["llm"],
   features: {
     usage: true,
+    usageApikey: true,
   },
 };
