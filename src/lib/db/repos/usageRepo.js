@@ -345,6 +345,34 @@ export async function getUsageHistory(filter = {}) {
   }));
 }
 
+// Validates a custom range (YYYY-MM-DD from the dashboard's date pickers) and
+// converts it to local-day bounds, matching usageDaily's local dateKey.
+// Throws on missing/malformed/inverted/oversized (>366d) input; API routes
+// map that to 400. The cap keeps the live-history scan bounded.
+export function parseCustomRange(startDate, endDate) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(startDate || "") || !re.test(endDate || "")) {
+    throw new Error("Custom range requires YYYY-MM-DD startDate and endDate");
+  }
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T23:59:59.999`);
+  // Round-trip rejects impossible dates (2026-02-31 rolls over to 2026-03-03).
+  const dayKey = (d) => Number.isNaN(d.getTime())
+    ? null
+    : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const startKey = dayKey(start);
+  const endKey = dayKey(end);
+  if (startKey !== startDate || endKey !== endDate) {
+    throw new Error("startDate/endDate must be real calendar dates");
+  }
+  if (startDate > endDate) throw new Error("startDate must not be after endDate");
+  const utc = (k) => Date.UTC(+k.slice(0, 4), +k.slice(5, 7) - 1, +k.slice(8, 10));
+  if (utc(endDate) - utc(startDate) > 365 * 86400000) {
+    throw new Error("Custom range must not exceed 366 days");
+  }
+  return { startKey, endKey, startISO: start.toISOString(), endISO: end.toISOString() };
+}
+
 function loadDaysInRange(adapter, maxDays) {
   if (maxDays == null) {
     return adapter.all(`SELECT dateKey, data FROM usageDaily`);
@@ -355,7 +383,7 @@ function loadDaysInRange(adapter, maxDays) {
   return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
 }
 
-export async function getUsageStats(period = "all") {
+export async function getUsageStats(period = "all", opts = {}) {
   const db = await getAdapter();
 
   const [{ getProviderConnections }, { getApiKeys }, { getProviderNodes }] = await Promise.all([
@@ -455,12 +483,17 @@ export async function getUsageStats(period = "all") {
     }
   }
 
-  const useDailySummary = period !== "24h" && period !== "today";
-
+  const isCustom = period === "custom";
+  const customRange = isCustom ? parseCustomRange(opts.startDate, opts.endDate) : null;
+  // Custom uses the day-level summary with exact day bounds so the
+  // model/account/key/endpoint breakdowns stay complete.
+  const useDailySummary = isCustom || (period !== "24h" && period !== "today");
   if (useDailySummary) {
     const periodDays = { "7d": 7, "30d": 30, "60d": 60 };
-    const maxDays = periodDays[period] || null;
-    const dayRows = loadDaysInRange(db, maxDays);
+    const maxDays = periodDays[period] ?? null;
+    const dayRows = isCustom
+      ? db.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ? AND dateKey <= ?`, [customRange.startKey, customRange.endKey])
+      : loadDaysInRange(db, maxDays);
 
     for (const dr of dayRows) {
       const dateKey = dr.dateKey;
@@ -550,15 +583,21 @@ export async function getUsageStats(period = "all") {
     }
 
     // Overlay precise lastUsed timestamps from history, bounded to a recent
-    // window: entries older than that keep the day-level lastUsed from
-    // usageDaily. Totals are unaffected.
-    const overlayCutoff = Math.max(
+    // window (or the requested range for custom): entries outside it keep
+    // the day-level lastUsed from usageDaily. Totals are unaffected.
+    const overlayCutoff = isCustom
+      ? customRange.startISO
+      : Math.max(
       maxDays ? Date.now() - maxDays * 86400000 : 0,
       Date.now() - 2 * 86400000
     );
+    const overlayEnd = isCustom ? customRange.endISO : null;
+    const overlayConds = [`timestamp >= ?`];
+    const overlayParams = [isCustom ? overlayCutoff : new Date(overlayCutoff).toISOString()];
+    if (overlayEnd) { overlayConds.push(`timestamp <= ?`); overlayParams.push(overlayEnd); }
     const histRows = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint FROM usageHistory WHERE timestamp >= ?`,
-      [new Date(overlayCutoff).toISOString()]
+      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint FROM usageHistory WHERE ${overlayConds.join(" AND ")}`,
+      overlayParams
     );
     for (const e of histRows) {
       const ts = e.timestamp;
@@ -595,7 +634,6 @@ export async function getUsageStats(period = "all") {
       `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
       [cutoff]
     );
-
     for (const r of filtered) {
       const tokens = parseJson(r.tokens, {}) || {};
       const promptTokens = tokens.prompt_tokens || 0;
@@ -681,9 +719,34 @@ export async function getUsageStats(period = "all") {
   return stats;
 }
 
-export async function getChartData(period = "7d") {
+export async function getChartData(period = "7d", opts = {}) {
   const db = await getAdapter();
   const now = Date.now();
+
+  if (period === "custom") {
+    // One bucket per local day from usageDaily (same source as the custom
+    // stats path), so bucket lines and totals always agree. Local-midnight
+    // iteration is DST-safe; offset arithmetic is not.
+    const { startKey, endKey } = parseCustomRange(opts.startDate, opts.endDate);
+    const labelFn = (k) => new Date(`${k}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const dayKeys = [];
+    for (let d = new Date(`${startKey}T00:00:00`); ; d.setDate(d.getDate() + 1)) {
+      dayKeys.push(getLocalDateKey(d));
+      if (getLocalDateKey(d) >= endKey) break;
+    }
+    const dayRows = db.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ? AND dateKey <= ?`, [startKey, endKey]);
+    const dayMap = {};
+    for (const r of dayRows) dayMap[r.dateKey] = parseJson(r.data, {});
+    return dayKeys.map((dateKey) => {
+      const dayData = dayMap[dateKey];
+      return {
+        label: labelFn(dateKey),
+        tokens: dayData ? (dayData.promptTokens || 0) + (dayData.completionTokens || 0) : 0,
+        cost: dayData ? (dayData.cost || 0) : 0,
+        requests: dayData ? (dayData.requests || 0) : 0,
+      };
+    });
+  }
 
   if (period === "today") {
     const bucketCount = 24;

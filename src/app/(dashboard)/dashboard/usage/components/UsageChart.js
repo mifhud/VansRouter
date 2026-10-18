@@ -81,16 +81,20 @@ const VIEW_CONFIG = {
   cost:     { dataKey: "cost",     color: "#f59e0b", gradId: "gradCost",     formatter: fmtCost,     label: "Cost" },
 };
 
-export default function UsageChart({ period = "7d" }) {
+export default function UsageChart({ period = "7d", customRange = null }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState("tokens");
-  const fetchedPeriodRef = useRef(null);
+  const fetchedKeyRef = useRef(null);
+  const rangeKey = period === "custom" && customRange ? `${customRange.startDate}|${customRange.endDate}` : "";
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/usage/chart?period=${period}`);
+      const qs = period === "custom" && customRange?.startDate && customRange?.endDate
+        ? `period=custom&startDate=${encodeURIComponent(customRange.startDate)}&endDate=${encodeURIComponent(customRange.endDate)}`
+        : `period=${period}`;
+      const res = await fetch(`/api/usage/chart?${qs}`);
       if (res.ok) {
         const json = await res.json();
         setData(json);
@@ -100,13 +104,14 @@ export default function UsageChart({ period = "7d" }) {
     } finally {
       setLoading(false);
     }
-  }, [period]);
+  }, [period, rangeKey]);
 
   useEffect(() => {
-    if (fetchedPeriodRef.current === period) return;
-    fetchedPeriodRef.current = period;
+    const key = `${period}|${rangeKey}`;
+    if (fetchedKeyRef.current === key) return;
+    fetchedKeyRef.current = key;
     fetchData();
-  }, [fetchData, period]);
+  }, [fetchData, period, rangeKey]);
 
   const cfg = VIEW_CONFIG[viewMode];
   const hasData = data.some((d) => (d[cfg.dataKey] || 0) > 0);

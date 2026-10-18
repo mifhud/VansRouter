@@ -323,8 +323,7 @@ function PeriodSelector({ period, setPeriod, fetching }) {
   );
 }
 
-
-export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
+export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false, customRange = null, customInvalid = false } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const sortBy = searchParams.get("sortBy") || "rawModel";
@@ -387,6 +386,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     return () => controller.abort();
   }, []);
   // Fetch filtered stats via REST when period changes
+  const rangeKey = period === "custom" && customRange ? `${customRange.startDate}|${customRange.endDate}` : "";
   useEffect(() => {
     // First load: show full spinner; subsequent: show subtle fetching indicator
     if (isInitialLoad.current) {
@@ -396,8 +396,17 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       setLoadState({ loading: false, fetching: true });
     }
 
+    // Skip invalid custom input (e.g. start after end): keep previous data.
+    if (period === "custom" && (customInvalid || !customRange?.startDate || !customRange?.endDate)) {
+      setLoadState({ loading: false, fetching: false });
+      return;
+    }
+
     const controller = new AbortController();
-    fetch(`/api/usage/stats?period=${period}`, { signal: controller.signal })
+    const qs = period === "custom" && customRange
+      ? `period=custom&startDate=${encodeURIComponent(customRange.startDate)}&endDate=${encodeURIComponent(customRange.endDate)}`
+      : `period=${period}`;
+    fetch(`/api/usage/stats?${qs}`, { signal: controller.signal })
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (controller.signal.aborted) return;
@@ -411,7 +420,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         if (!controller.signal.aborted) setLoadState({ loading: false, fetching: false });
       });
     return () => controller.abort();
-  }, [period]);
+  }, [period, rangeKey]);
   // SSE connection - real-time updates for activeRequests + recentRequests only
   useEffect(() => {
     const es = new EventSource("/api/usage/stream");
@@ -640,7 +649,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           `chartSkeleton` is sized to UsageChart's full height so this swap does
           not move the table. */}
       <div ref={chartsRef}>
-        {loading || !chartsInView ? chartSkeleton : <UsageChart period={period} />}
+        {loading || !chartsInView ? chartSkeleton : <UsageChart period={period} customRange={period === "custom" ? customRange : null} />}
       </div>
 
       {/* Provider and model breakdown charts */}
