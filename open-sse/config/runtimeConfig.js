@@ -124,3 +124,20 @@ export function capRetryAttemptsByAccountCount(retryConfig, accountCount) {
 export const SKIP_PATTERNS = [
   "Please write a 5-10 word title for the following conversation:"
 ];
+
+// === Combo retry (INFINITY_RETRY) ===
+
+function envIntSigned(name, def) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return def;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : def;
+}
+
+// Maximum number of times to retry the WHOLE combo cycle (all models in the list)
+// when every model in the cycle failed. -1 = infinite retry until client abort.
+export const COMBO_MAX_RETRIES = envIntSigned("COMBO_MAX_RETRIES", -1);
+
+// Throttle delay between retry cycles (ms). Applied on retries >= 1 to avoid
+// hammering providers in a tight loop. Env: COMBO_RETRY_DELAY_MS.
+export const COMBO_RETRY_DELAY_MS = envIntSigned("COMBO_RETRY_DELAY_MS", 500);

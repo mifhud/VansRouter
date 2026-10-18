@@ -47,6 +47,22 @@ export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+/**
+ * Error message keywords for 400 status that should STILL trigger fallback (retry next model).
+ * These indicate request/content issues that a different model may handle (e.g. context length overflow).
+ * Non-keyworded 400s (malformed body, unsupported param) return immediately — retrying won't help.
+ * @type {string[]}
+ */
+export const HIGHLY_RETRY_ERRONEOUS_400_KEYWORDS = [
+  "context length",
+  "too long",
+  "max tokens",
+  "overflow",
+  "context exceeded",
+  "maximum length",
+  "too many tokens",
+  "token limit",
+];
 
 // Cooldown durations (ms)
 const COOLDOWN = {

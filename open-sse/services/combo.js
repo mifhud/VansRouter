@@ -7,6 +7,15 @@ import { unavailableResponse } from "../utils/error.js";
 import { DEFAULT_COMBO_TARGET_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
+import { COMBO_MAX_RETRIES, COMBO_RETRY_DELAY_MS } from "../config/runtimeConfig.js";
+import { HIGHLY_RETRY_ERRONEOUS_400_KEYWORDS } from "../config/errorConfig.js";
+/**
+ * Check if a 400 error is retryable (context/token issues that a different model may handle)
+ */
+function is400Retryable(errorText) {
+  const lowerError = (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase();
+  return HIGHLY_RETRY_ERRONEOUS_400_KEYWORDS.some(keyword => lowerError.includes(keyword));
+}
 
 // Strip "combo/" prefix from model string (e.g. "combo/coding-stack" → "coding-stack")
 export function stripComboPrefix(modelStr) {
@@ -215,6 +224,7 @@ function normalizeStickyLimit(stickyLimit) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 }
 
+
 function rotateModelsFromIndex(models, currentIndex) {
   const rotatedModels = [...models];
   for (let i = 0; i < currentIndex; i++) {
@@ -354,127 +364,139 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
+  const maxRetries = COMBO_MAX_RETRIES;
+  const infinite = maxRetries < 0;
+  let cycle = 0;
 
-  for (let i = 0; i < rotatedModels.length; i++) {
-    const modelStr = rotatedModels[i];
-
-    // Honor external abort before trying the next target.
-    if (signal?.aborted) {
-      log.info("COMBO", "External signal aborted — stopping combo fallback");
-      return new Response(
-        JSON.stringify({ error: { message: "Client disconnected" } }),
-        { status: 499, headers: { "Content-Type": "application/json" } }
-      );
+  while (infinite || cycle <= maxRetries) {
+    if (cycle > 0) {
+      if (signal?.aborted) break;
+      log.info("COMBO", `Combo retry cycle ${cycle}${infinite ? " (infinite)" : `/${maxRetries}`}`);
+      if (COMBO_RETRY_DELAY_MS > 0) {
+        await new Promise(r => setTimeout(r, COMBO_RETRY_DELAY_MS));
+      }
     }
 
-    log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
+    for (let i = 0; i < rotatedModels.length; i++) {
+      const modelStr = rotatedModels[i];
 
-    try {
-      let result;
-      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-        result = await handleSingleModel(body, modelStr);
-      } else {
-        const timeoutController = new AbortController();
-        let timeoutId;
-        let timedOut = false;
-
-        const targetSignal = combineSignals(signal, timeoutController.signal);
-        const targetOptions = {};
-        if (targetSignal) targetOptions.signal = targetSignal;
-        if (queueDepth != null) targetOptions.maxQueueSize = queueDepth;
-
-        const timeoutPromise = new Promise((resolve) => {
-          timeoutId = setTimeout(() => {
-            timedOut = true;
-            log.warn("COMBO", `Model ${modelStr} exceeded ${timeoutMs}ms timeout — falling back`);
-            timeoutController.abort(new Error("combo-per-model-timeout"));
-            resolve(
-              new Response(
-                JSON.stringify({ error: { message: `Model ${modelStr} timed out` } }),
-                { status: 524, headers: { "Content-Type": "application/json" } }
-              )
-            );
-          }, timeoutMs);
-        });
-
-        try {
-          result = await Promise.race([
-            Promise.resolve(handleSingleModel(body, modelStr, Object.keys(targetOptions).length > 0 ? targetOptions : undefined)).catch((err) => {
-              if (timedOut) {
-                // The inner call rejected because we aborted it. The synthetic 524
-                // from timeoutPromise already won the race; return an empty response
-                // so the loser branch resolves cleanly without leaking err.message.
-                return new Response(null, { status: 599 });
-              }
-              throw err;
-            }),
-            timeoutPromise,
-          ]);
-        } finally {
-          clearTimeout(timeoutId);
-        }
+      // Honor external abort before trying the next target.
+      if (signal?.aborted) {
+        log.info("COMBO", "External signal aborted — stopping combo fallback");
+        return new Response(
+          JSON.stringify({ error: { message: "Client disconnected" } }),
+          { status: 499, headers: { "Content-Type": "application/json" } }
+        );
       }
 
-      // Success (2xx) - return response
-      if (result.ok) {
-        log.info("COMBO", `Model ${modelStr} succeeded`);
-        return result;
-      }
+      log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
-      // Extract error info from response
-      let errorText = result.statusText || "";
-      let retryAfter = null;
       try {
-        const errorBody = await result.clone().json();
-        errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
-        retryAfter = errorBody?.retryAfter || null;
-      } catch {
-        // Ignore JSON parse errors
+        let result;
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+          result = await handleSingleModel(body, modelStr);
+        } else {
+          const timeoutController = new AbortController();
+          let timeoutId;
+          let timedOut = false;
+
+          const targetSignal = combineSignals(signal, timeoutController.signal);
+          const targetOptions = {};
+          if (targetSignal) targetOptions.signal = targetSignal;
+          if (queueDepth != null) targetOptions.maxQueueSize = queueDepth;
+
+          const timeoutPromise = new Promise((resolve) => {
+            timeoutId = setTimeout(() => {
+              timedOut = true;
+              log.warn("COMBO", `Model ${modelStr} exceeded ${timeoutMs}ms timeout — falling back`);
+              timeoutController.abort(new Error("combo-per-model-timeout"));
+              resolve(
+                new Response(
+                  JSON.stringify({ error: { message: `Model ${modelStr} timed out` } }),
+                  { status: 524, headers: { "Content-Type": "application/json" } }
+                )
+              );
+            }, timeoutMs);
+          });
+
+          try {
+            result = await Promise.race([
+              Promise.resolve(handleSingleModel(body, modelStr, Object.keys(targetOptions).length > 0 ? targetOptions : undefined)).catch((err) => {
+                if (timedOut) {
+                  return new Response(null, { status: 599 });
+                }
+                throw err;
+              }),
+              timeoutPromise,
+            ]);
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        }
+
+        // Success (2xx) - return response immediately
+        if (result.ok) {
+          log.info("COMBO", `Model ${modelStr} succeeded`);
+          return result;
+        }
+
+        // Extract error info from response
+        let errorText = result.statusText || "";
+        let retryAfter = null;
+        try {
+          const errorBody = await result.clone().json();
+          errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
+          retryAfter = errorBody?.retryAfter || null;
+        } catch {
+          // Ignore JSON parse errors
+        }
+
+        // Track earliest retryAfter across all combo models
+        if (retryAfter && (!earliestRetryAfter || new Date(retryAfter) < new Date(earliestRetryAfter))) {
+          earliestRetryAfter = retryAfter;
+        }
+
+        // Normalize error text to string (Worker-safe)
+        if (typeof errorText !== "string") {
+          try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
+        }
+
+        // Check if should fallback to next model
+        let { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+        // 400 with retryable keywords: treat like backoffable error
+        if (result.status === 400 && !shouldFallback) {
+          shouldFallback = is400Retryable(errorText);
+        }
+        if (!shouldFallback) {
+          log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
+          return result;
+        }
+
+        // For transient errors (503/502/504), wait for cooldown before falling through
+        if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
+            (result.status === 503 || result.status === 502 || result.status === 504)) {
+          log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
+          await new Promise(r => setTimeout(r, cooldownMs));
+        }
+
+        // Fallback to next model
+        lastError = errorText || String(result.status);
+        if (!lastStatus) lastStatus = result.status;
+        log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+      } catch (error) {
+        // Catch unexpected exceptions to ensure fallback continues
+        lastError = error.message || String(error);
+        if (!lastStatus) lastStatus = 500;
+        log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
       }
-
-      // Track earliest retryAfter across all combo models
-      if (retryAfter && (!earliestRetryAfter || new Date(retryAfter) < new Date(earliestRetryAfter))) {
-        earliestRetryAfter = retryAfter;
-      }
-
-      // Normalize error text to string (Worker-safe)
-      if (typeof errorText !== "string") {
-        try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
-      }
-
-      // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
-
-      if (!shouldFallback) {
-        log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
-        return result;
-      }
-
-      // For transient errors (503/502/504), wait for cooldown before falling through
-      // so a briefly-overloaded provider gets a chance to recover rather than being
-      // skipped immediately (fixes: combo falls through on transient 503)
-      if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
-          (result.status === 503 || result.status === 502 || result.status === 504)) {
-        log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
-        await new Promise(r => setTimeout(r, cooldownMs));
-      }
-
-      // Fallback to next model
-      lastError = errorText || String(result.status);
-      if (!lastStatus) lastStatus = result.status;
-      log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
-    } catch (error) {
-      // Catch unexpected exceptions to ensure fallback continues
-      lastError = error.message || String(error);
-      if (!lastStatus) lastStatus = 500;
-      log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
+
+    // All models in this cycle failed. If no more retries allowed, break out.
+    if (!infinite && cycle >= maxRetries) break;
+    cycle++;
   }
 
-  // All models failed
-  // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies
-  // the request itself is invalid, but here the providers are simply unavailable
-  // or have no active credentials. 503 is more accurate and retryable by clients.
+  // All cycles exhausted
   const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
   const status = allDisabled ? 503 : (lastStatus || 503);
   const msg = lastError || "All combo models unavailable";
