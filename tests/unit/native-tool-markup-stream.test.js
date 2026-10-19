@@ -91,13 +91,28 @@ describe("passthrough: native tool-call markup recovery", () => {
     expect(output).not.toContain("<arg_key>");
     expect(output).not.toContain("<arg_value>");
     expect(output).toContain("Let me check the stack.");
+    // The recovered call must be the ONLY finish the client sees: an upstream
+    // "stop" ahead of it would make some clients finalize and drop the call.
+    const finishReasons = chunks
+      .map((c) => c.choices?.[0]?.finish_reason)
+      .filter((r) => r);
+    expect(finishReasons).toEqual(["tool_calls"]);
   });
 
-  it("recovers markup split across chunk boundaries at flush", async () => {
+  it("recovers markup split across many tiny frames before the finish is sent", async () => {
+    // Real production shape: the provider streams ~2 chars per frame, so no
+    // single chunk ever contains a complete block (173 chars over 96 chunks).
+    const leaked =
+      "<tool_call>shell<arg_key>cmd</arg_key><arg_value>git log --oneline " +
+      "a3e20bfa5567a1c72245bede7f58107acbd4ad64..0430de28d624861f301320525e7c634b3650f71f" +
+      "</arg_value></tool_call>";
+    const pieces = [];
+    for (let i = 0; i < leaked.length; i += 2) pieces.push(leaked.slice(i, i + 2));
+
     const stream = createPassthroughStreamWithLogger(
       "test",
       null,
-      "poolside/laguna-s-2.1:free",
+      "laguna-s-2.1:free",
       null,
       null,
       null,
@@ -106,18 +121,22 @@ describe("passthrough: native tool-call markup recovery", () => {
     );
 
     const output = await runStream(stream, [
-      chunk({ role: "assistant", content: "<tool_ca" }),
-      chunk({ content: 'll>read<arg_key>path</arg_key><arg_value>/tmp/a</arg_value></tool_call>' }),
+      chunk({ role: "assistant" }),
+      ...pieces.map((content) => chunk({ content })),
       chunk({}, "stop"),
     ]);
 
     const chunks = parseDataLines(output);
     const toolChunk = chunks.find((c) => c.choices?.[0]?.delta?.tool_calls);
     expect(toolChunk).toBeDefined();
-    expect(toolChunk.choices[0].delta.tool_calls[0].function.name).toBe("read");
+    expect(toolChunk.choices[0].delta.tool_calls[0].function.name).toBe("shell");
     expect(JSON.parse(toolChunk.choices[0].delta.tool_calls[0].function.arguments)).toEqual({
-      path: "/tmp/a",
+      cmd:
+        "git log --oneline a3e20bfa5567a1c72245bede7f58107acbd4ad64..0430de28d624861f301320525e7c634b3650f71f",
     });
+    // The upstream "stop" must not reach the client ahead of the recovered call.
+    const finishReasons = chunks.map((c) => c.choices?.[0]?.finish_reason).filter((r) => r);
+    expect(finishReasons).toEqual(["tool_calls"]);
   });
 
   it("passes OpenRouter's `reasoning` field through instead of dropping the turn", async () => {
@@ -181,7 +200,7 @@ describe("passthrough: recovered calls must reference declared tools", () => {
     expect(toolChunk.choices[0].delta.tool_calls[0].function.name).toBe("shell");
   });
 
-  it("does NOT invent a tool call for an undeclared tool name", async () => {
+  it("recovers explicit tag markup even when the tool name is undeclared", async () => {
     const stream = createPassthroughStreamWithLogger(
       "test",
       null,
@@ -195,14 +214,73 @@ describe("passthrough: recovered calls must reference declared tools", () => {
     const out = await runStream(stream, [
       chunk({
         role: "assistant",
-        content: "<tool_call>dangerous<arg_key>cmd</arg_key><arg_value>rm -rf /</arg_value></tool_call>",
+        content: "<tool_call>frobnicate<arg_key>cmd</arg_key><arg_value>ls</arg_value></tool_call>",
       }),
+      chunk({}, "stop"),
+    ]);
+    const chunks = parseDataLines(out);
+    const toolChunk = chunks.find((c) => c.choices?.[0]?.delta?.tool_calls);
+    // <tool_call>… is explicit tool syntax: recovering it (and letting the client
+    // report an unknown tool) beats leaving the agent stalled on prose.
+    expect(toolChunk).toBeDefined();
+    expect(toolChunk.choices[0].delta.tool_calls[0].function.name).toBe("frobnicate");
+  });
+
+  it("does NOT turn ambiguous Kimi syntax prose into an undeclared tool call", async () => {
+    const stream = createPassthroughStreamWithLogger(
+      "test",
+      null,
+      "poolside/laguna-s-2.1:free",
+      null,
+      body,
+      null,
+      null,
+      normalizeNativeToolCalls
+    );
+    const out = await runStream(stream, [
+      chunk({ role: "assistant", content: 'functions.dangerous:0 {"cmd":"rm -rf /"}' }),
       chunk({}, "stop"),
     ]);
     const chunks = parseDataLines(out);
     expect(chunks.find((c) => c.choices?.[0]?.delta?.tool_calls)).toBeUndefined();
     // …and the model's text is preserved rather than silently deleted.
     expect(out).toContain("dangerous");
+  });
+
+  it("recovers the exact production payload that stalled the agent", async () => {
+    // Verbatim providerResponse stored in requestDetails at
+    // 2026-10-19T09:25:05Z (laguna-s-2.1:free, combo low-rotate-free).
+    const leaked =
+      "<tool_call>shell<arg_key>cmd</arg_key><arg_value>git log --oneline " +
+      "a3e20bfa5567a1c72245bede7f58107acbd4ad64..0430de28d624861f301320525e7c634b3650f71f" +
+      "</arg_value></tool_call>";
+    expect(leaked.length).toBe(173);
+
+    const stream = createPassthroughStreamWithLogger(
+      "test",
+      null,
+      "laguna-s-2.1:free",
+      null,
+      body,
+      null,
+      null,
+      normalizeNativeToolCalls
+    );
+    const out = await runStream(stream, [
+      chunk({ role: "assistant", content: leaked }),
+      chunk({}, "stop"),
+    ]);
+
+    const chunks = parseDataLines(out);
+    const toolChunk = chunks.find((c) => c.choices?.[0]?.delta?.tool_calls);
+    expect(toolChunk).toBeDefined();
+    const call = toolChunk.choices[0].delta.tool_calls[0];
+    expect(call.function.name).toBe("shell");
+    expect(JSON.parse(call.function.arguments)).toEqual({
+      cmd:
+        "git log --oneline a3e20bfa5567a1c72245bede7f58107acbd4ad64..0430de28d624861f301320525e7c634b3650f71f",
+    });
+    expect(out).not.toContain("<arg_key>");
   });
 });
 

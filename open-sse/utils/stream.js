@@ -149,28 +149,37 @@ export function createSSEStream(options = {}) {
   let leakedToolCalls = null;
   let leakedToolCallsEmitted = false;
   let recoveredToolCallCount = 0;
-  // A recovered call must reference a tool the request actually declared, when a
-  // tool list was sent: prose that merely contains a markup-looking fragment
-  // (`the functions.foo {"a":1} syntax`) must never become a tool call. Names are
-  // fuzzy-corrected first, exactly like structured deltas, so mangled names
-  // (functionsread → read) still recover. With no tool list the parser stays
-  // permissive, matching the historical Kimi-only behaviour.
-  const acceptRecoveredCalls = (calls) => {
+  // Validate recovered calls against the tools the request actually declared.
+  //
+  // Only the Kimi style (`functions.NAME {json}`) is ambiguous: a model writes
+  // that same syntax when it merely *describes* tool calling, so its name must
+  // match a declared tool (after fuzzy correction, like structured deltas) or it
+  // is not a real call. Tag-style (`<tool_call>…`) and Mistral (`[TOOL_CALLS]`)
+  // markup is explicit tool syntax — recovering it even when the model drifted
+  // from the declared schema is strictly better than leaving the agent stalled,
+  // which is the exact failure this exists to fix.
+  //
+  // With no tool list the parser stays permissive, matching the historical
+  // Kimi-only behaviour.
+  const acceptRecoveredCalls = (calls, style) => {
     if (!Array.isArray(calls) || calls.length === 0) return [];
-    if (!validToolNames || validToolNames.length === 0) return calls;
+    const hasDeclaredTools = Array.isArray(validToolNames) && validToolNames.length > 0;
+    if (!hasDeclaredTools) return calls;
+
     const accepted = [];
     for (const call of calls) {
       const name = call?.function?.name;
       if (typeof name !== "string") continue;
       const corrected = fuzzyMatchToolName(name, validToolNames);
-      if (!corrected || !validToolNames.includes(corrected)) continue;
-      if (corrected !== name) call.function.name = corrected;
+      const isDeclared = Boolean(corrected) && validToolNames.includes(corrected);
+      if (style === "kimi" && !isDeclared) continue;
+      if (isDeclared && corrected !== name) call.function.name = corrected;
       accepted.push(call);
     }
     return accepted;
   };
-  const mergeLeakedToolCalls = (calls) => {
-    const accepted = acceptRecoveredCalls(calls);
+  const mergeLeakedToolCalls = (calls, style) => {
+    const accepted = acceptRecoveredCalls(calls, style);
     if (accepted.length === 0) return accepted;
     const byId = new Map((leakedToolCalls || []).map((c) => [c.id, c]));
     for (const call of accepted) byId.set(call.id, call);
@@ -395,19 +404,46 @@ export function createSSEStream(options = {}) {
               // array. Raw markup becomes leading prose only; the recovered calls
               // are emitted as a synthetic tool_calls chunk at finish/flush time.
               if (canNormalizeToolCalls && delta && typeof content === "string") {
-                const { message: normalized, hasTools } = normalizeToolCalls({
+                const { message: normalized, hasTools, style } = normalizeToolCalls({
                   role: "assistant",
                   content,
                 });
                 // Strip the markup only when a call is actually recovered — if
                 // nothing is accepted, keep the text so no output is destroyed.
-                if (hasTools && mergeLeakedToolCalls(normalized.tool_calls).length > 0) {
+                if (hasTools && mergeLeakedToolCalls(normalized.tool_calls, style).length > 0) {
                   const kept = normalized.content || "";
                   totalContentLength -= content.length - kept.length;
                   accumulatedContent = accumulatedContent.slice(0, accumulatedContent.length - content.length) + kept;
                   if (kept) delta.content = kept;
                   else delete delta.content;
                   fieldsInjected = true; // force re-serialization with stripped content
+                }
+              }
+              // If markup was recovered and this chunk carries finish_reason, the
+              // upstream "stop" would tell the client the turn ended as plain
+              // text before the tool call arrives — some clients finalize on the
+              // first finish_reason and then drop the recovered call. Emit the
+              // synthetic tool_calls chunk instead, forwarding the upstream chunk
+              // only when it also carries usage (which must not be lost).
+              //
+              // Markup often arrives split across many tiny frames (the observed
+              // production case: 173 chars over 96 chunks), so per-chunk parsing
+              // never sees a complete block. Re-parse the accumulated content here
+              // to recover it before the client sees the finish.
+              if (!leakedToolCallsEmitted && parsed.choices?.some((choice) => choice?.finish_reason)) {
+                let calls = leakedToolCalls;
+                if ((!calls || calls.length === 0) && canNormalizeToolCalls && accumulatedContent) {
+                  const { hasTools, message: normalized, style } = normalizeToolCalls({
+                    role: "assistant",
+                    content: accumulatedContent,
+                  });
+                  if (hasTools) calls = acceptRecoveredCalls(normalized.tool_calls, style);
+                }
+                if (calls && calls.length > 0) {
+                  emitRecoveredToolCalls(controller, calls);
+                  if (!parsed.usage) continue;
+                  for (const choice of parsed.choices) choice.finish_reason = "tool_calls";
+                  fieldsInjected = true;
                 }
               }
               // Tool-call-only responses (e.g. agentic coding tools with large
@@ -585,13 +621,13 @@ export function createSSEStream(options = {}) {
         // prose so the client never sees the native token soup.
         if (canNormalizeToolCalls && parsed.choices?.[0]?.delta?.content) {
           const originalDelta = parsed.choices[0].delta.content;
-          const { message: normalized, hasTools } = normalizeToolCalls({
+          const { message: normalized, hasTools, style } = normalizeToolCalls({
             role: "assistant",
             content: originalDelta,
           });
           // Strip the markup only when a call is actually recovered — if nothing
           // is accepted, keep the text so no output is destroyed.
-          if (hasTools && mergeLeakedToolCalls(normalized.tool_calls).length > 0) {
+          if (hasTools && mergeLeakedToolCalls(normalized.tool_calls, style).length > 0) {
             parsed.choices[0].delta.content = normalized.content || undefined;
             if (!parsed.choices[0].delta.content) {
               delete parsed.choices[0].delta.content;
@@ -757,8 +793,8 @@ export function createSSEStream(options = {}) {
           if (!leakedToolCallsEmitted && !isGeminiFamily) {
             let calls = leakedToolCalls;
             if ((!calls || calls.length === 0) && canNormalizeToolCalls && accumulatedContent) {
-              const { hasTools, message: normalized } = normalizeToolCalls({ role: "assistant", content: accumulatedContent });
-              if (hasTools) calls = acceptRecoveredCalls(normalized.tool_calls);
+              const { hasTools, message: normalized, style } = normalizeToolCalls({ role: "assistant", content: accumulatedContent });
+              if (hasTools) calls = acceptRecoveredCalls(normalized.tool_calls, style);
             }
             emitRecoveredToolCalls(controller, calls);
           }
@@ -838,11 +874,11 @@ export function createSSEStream(options = {}) {
         if (!leakedToolCallsEmitted && canNormalizeToolCalls && sourceFormat === FORMATS.OPENAI) {
           let calls = leakedToolCalls;
           if (!calls || calls.length === 0) {
-            const { hasTools, message: normalized } = normalizeToolCalls({
+            const { hasTools, message: normalized, style } = normalizeToolCalls({
               role: "assistant",
               content: accumulatedContent,
             });
-            if (hasTools) calls = acceptRecoveredCalls(normalized.tool_calls);
+            if (hasTools) calls = acceptRecoveredCalls(normalized.tool_calls, style);
           }
           emitRecoveredToolCalls(controller, calls);
         }

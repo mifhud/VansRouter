@@ -164,17 +164,33 @@ function extractMistralToolCalls(content) {
  * @returns {Array<{id: string, type: string, function: {name: string, arguments: string}}>}
  */
 export function extractNativeToolCalls(content) {
-  if (!hasNativeToolMarkup(content)) return [];
+  return extractNativeToolCallsDetailed(content).calls;
+}
+
+/**
+ * Extract native tool calls together with the markup style that produced them.
+ *
+ * The style matters downstream: `<tool_call>…` / `[TOOL_CALLS]` are explicit tool
+ * syntax (no legitimate prose looks like that), while Kimi's
+ * `functions.NAME {json}` is also what a model writes when merely *describing*
+ * the syntax. Callers may therefore validate the name only for "kimi".
+ *
+ * @param {string|null|undefined} content
+ * @returns {{calls: Array, style: "tag"|"kimi"|"mistral"|null}}
+ */
+function extractNativeToolCallsDetailed(content) {
+  if (!hasNativeToolMarkup(content)) return { calls: [], style: null };
 
   const tagCalls = extractTagToolCalls(content);
-  if (tagCalls.length > 0) return tagCalls;
+  if (tagCalls.length > 0) return { calls: tagCalls, style: "tag" };
 
   if (hasKimiToolMarkup(content)) {
     const kimi = parseKimiToolCalls(content);
-    if (kimi && kimi.length > 0) return kimi;
+    if (kimi && kimi.length > 0) return { calls: kimi, style: "kimi" };
   }
 
-  return extractMistralToolCalls(content);
+  const mistral = extractMistralToolCalls(content);
+  return { calls: mistral, style: mistral.length > 0 ? "mistral" : null };
 }
 
 /**
@@ -196,19 +212,19 @@ function firstMarkupIndex(content) {
  * `tool_calls` array is attached, so the client agent can execute the tool.
  *
  * @param {{role?: string, content?: string, tool_calls?: array|null}} message
- * @returns {{message: object, hasTools: boolean, originalContent: string}}
+ * @returns {{message: object, hasTools: boolean, originalContent: string, style: string|null}}
  */
 export function normalizeNativeToolCalls(message) {
   const originalContent = typeof message?.content === "string" ? message.content : "";
 
   // Respect already-structured tool_calls.
   if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
-    return { message: { ...message }, hasTools: true, originalContent };
+    return { message: { ...message }, hasTools: true, originalContent, style: "structured" };
   }
 
-  const calls = extractNativeToolCalls(originalContent);
+  const { calls, style } = extractNativeToolCallsDetailed(originalContent);
   if (calls.length === 0) {
-    return { message: { ...message }, hasTools: false, originalContent };
+    return { message: { ...message }, hasTools: false, originalContent, style: null };
   }
 
   const cut = firstMarkupIndex(originalContent);
@@ -227,5 +243,6 @@ export function normalizeNativeToolCalls(message) {
     message: { ...message, content: prose, tool_calls: calls },
     hasTools: true,
     originalContent,
+    style,
   };
 }
