@@ -141,3 +141,30 @@ export const COMBO_MAX_RETRIES = envIntSigned("COMBO_MAX_RETRIES", -1);
 // Throttle delay between retry cycles (ms). Applied on retries >= 1 to avoid
 // hammering providers in a tight loop. Env: COMBO_RETRY_DELAY_MS.
 export const COMBO_RETRY_DELAY_MS = envIntSigned("COMBO_RETRY_DELAY_MS", 500);
+
+// === Unusable-turn gate (combo fallback for empty responses) ===
+
+// A provider can answer HTTP 200 and stream a response that carries no usable
+// assistant output (empty deltas, markup that could not be recovered into a
+// tool call). The combo peeks the body before committing it so it can try the
+// next model instead. Substantive frames are buffered while deciding; SSE
+// comment (keep-alive) frames are forwarded immediately.
+//
+// Hard cap on buffered frame bytes before the gate gives up and commits.
+// Env: TURN_GATE_MAX_BYTES.
+export const TURN_GATE_MAX_BYTES = envIntSigned("TURN_GATE_MAX_BYTES", 256 * 1024);
+
+// Hard cap on how long the gate may hold a response before committing it. Kept
+// below the Cloudflare edge idle timeout (100s). Env: TURN_GATE_MAX_WAIT_MS.
+export const TURN_GATE_MAX_WAIT_MS = envIntSigned("TURN_GATE_MAX_WAIT_MS", 90 * 1000);
+
+// Total time budget for unusable-turn retries across a single combo request.
+// Once exceeded, the last (still empty) response is returned instead of
+// retrying forever. Env: COMBO_UNUSABLE_BUDGET_MS.
+export const COMBO_UNUSABLE_BUDGET_MS = envIntSigned("COMBO_UNUSABLE_BUDGET_MS", 120 * 1000);
+
+// While the unusable-turn gate holds substantive frames, it emits its own SSE
+// keep-alive comment at this interval so the client link never looks idle
+// (Nginx proxy_read_timeout defaults to 60s, Cloudflare edges cut at ~100s).
+// Env: TURN_GATE_HEARTBEAT_MS.
+export const TURN_GATE_HEARTBEAT_MS = envIntSigned("TURN_GATE_HEARTBEAT_MS", 15 * 1000);

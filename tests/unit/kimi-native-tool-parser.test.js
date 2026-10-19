@@ -8,7 +8,7 @@ import {
   parseKimiToolCalls,
   normalizeKimiToolCalls,
 } from "../../open-sse/utils/kimiToolParser.js";
-import { createSSETransformStreamWithLogger, buildOpenAIToolCallsChunk, emitKimiToolCallsChunk } from "../../open-sse/utils/stream.js";
+import { createSSETransformStreamWithLogger, buildOpenAIToolCallsChunk, emitSyntheticToolCallsChunk } from "../../open-sse/utils/stream.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 
 describe("hasKimiToolMarkup", () => {
@@ -334,12 +334,12 @@ describe("streaming helpers", () => {
     expect(chunk.id).toBe("chatcmpl-msg_123");
   });
 
-  it("emitKimiToolCallsChunk enqueues encoded SSE output for OpenAI", () => {
+  it("emitSyntheticToolCallsChunk enqueues encoded SSE output for OpenAI", () => {
     const enqueued = [];
     const controller = {
       enqueue(value) { enqueued.push(value); }
     };
-    const emitted = emitKimiToolCallsChunk(
+    const emitted = emitSyntheticToolCallsChunk(
       controller,
       [{ id: "functions.bash:0", type: "function", function: { name: "bash", arguments: "{\"x\":1}" } }],
       { messageId: "msg_123" },
@@ -354,9 +354,9 @@ describe("streaming helpers", () => {
     expect(decoded).toContain('"tool_calls"');
   });
 
-  it("emitKimiToolCallsChunk is a no-op for non-OpenAI formats", () => {
+  it("emitSyntheticToolCallsChunk is a no-op for non-OpenAI formats", () => {
     const controller = { enqueue: () => { throw new Error("should not be called"); } };
-    const emitted = emitKimiToolCallsChunk(controller, [{ id: "x", type: "function", function: { name: "bash", arguments: "{}" } }], null, "m", FORMATS.CLAUDE, null);
+    const emitted = emitSyntheticToolCallsChunk(controller, [{ id: "x", type: "function", function: { name: "bash", arguments: "{}" } }], null, "m", FORMATS.CLAUDE, null);
     expect(emitted).toBe(false);
   });
 

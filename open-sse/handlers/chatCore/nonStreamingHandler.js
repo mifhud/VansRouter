@@ -1,7 +1,7 @@
 import { FORMATS } from "../../translator/formats.js";
 import { needsTranslation } from "../../translator/index.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
-import { normalizeKimiToolCalls } from "../../utils/kimiToolParser.js";
+import { normalizeNativeToolCalls } from "../../utils/nativeToolParser.js";
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
@@ -285,15 +285,15 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
 
   // Only apply OpenAI-specific post-processing when response is still in OpenAI format
   if (!didReverse) {
-    // Native Kimi tool-call markup sometimes leaks into `content` instead of being
-    // returned as a structured `tool_calls` array (see .docs/audit/KIMI-WEIRD-OUTPUTS.md).
-    // Convert it for Kimi-family models before the finish_reason fixup.
-    const isKimiModel = /kimi-k2\./i.test(model || "");
-    if (isKimiModel && Array.isArray(translatedResponse?.choices)) {
+    // Native tool-call markup sometimes leaks into `content` instead of being
+    // returned as a structured `tool_calls` array (Kimi `functions.NAME {…}`,
+    // Laguna `<tool_call>NAME<arg_key>…`, Mistral `[TOOL_CALLS]`). Convert it for
+    // any model before the finish_reason fixup, not just Kimi.
+    if (Array.isArray(translatedResponse?.choices)) {
       for (const choice of translatedResponse.choices) {
         const msg = choice?.message;
         if (!msg || msg.role !== "assistant") continue;
-        const { message: normalized, hasTools } = normalizeKimiToolCalls(msg);
+        const { message: normalized, hasTools } = normalizeNativeToolCalls(msg);
         if (hasTools) {
           choice.message = normalized;
         }

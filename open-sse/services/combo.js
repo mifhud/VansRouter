@@ -7,7 +7,8 @@ import { unavailableResponse } from "../utils/error.js";
 import { DEFAULT_COMBO_TARGET_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
-import { COMBO_MAX_RETRIES, COMBO_RETRY_DELAY_MS } from "../config/runtimeConfig.js";
+import { COMBO_MAX_RETRIES, COMBO_RETRY_DELAY_MS, COMBO_UNUSABLE_BUDGET_MS } from "../config/runtimeConfig.js";
+import { gateTurn } from "./turnGate.js";
 import { HIGHLY_RETRY_ERRONEOUS_400_KEYWORDS } from "../config/errorConfig.js";
 /**
  * Check if a 400 error is retryable (context/token issues that a different model may handle)
@@ -368,6 +369,15 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   const infinite = maxRetries < 0;
   let cycle = 0;
 
+  // Agentic turns (requests that declare tools) must produce usable output:
+  // an empty or markup-only turn makes the client agent stop mid-way. Gate each
+  // 2xx response before committing it, and fall through to the next model when
+  // it carries nothing the agent can act on. Bounded to one pass over the model
+  // list and a total time budget so an infinite combo cannot spin forever.
+  const requireUsableTurn = Array.isArray(body?.tools) && body.tools.length > 0;
+  const unusableDeadline = Date.now() + COMBO_UNUSABLE_BUDGET_MS;
+  let unusableRetries = 0;
+
   while (infinite || cycle <= maxRetries) {
     if (cycle > 0) {
       if (signal?.aborted) break;
@@ -434,8 +444,26 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
           }
         }
 
-        // Success (2xx) - return response immediately
+        // Success (2xx) - return response immediately, unless the turn carries
+        // nothing the client agent can act on.
         if (result.ok) {
+          if (requireUsableTurn) {
+            const gate = await gateTurn(result);
+            if (!gate.usable) {
+              const canRetry = unusableRetries + 1 < rotatedModels.length && Date.now() < unusableDeadline;
+              log.warn(
+                "COMBO",
+                `Model ${modelStr} returned an unusable turn (${gate.reason})${canRetry ? " — trying next model" : " — returning it (retry budget exhausted)"}`
+              );
+              if (canRetry) {
+                unusableRetries++;
+                continue;
+              }
+              return gate.response;
+            }
+            log.info("COMBO", `Model ${modelStr} succeeded`);
+            return gate.response;
+          }
           log.info("COMBO", `Model ${modelStr} succeeded`);
           return result;
         }
