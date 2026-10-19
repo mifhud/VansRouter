@@ -1,6 +1,6 @@
 // Stream handler with disconnect detection - shared for all providers
 import { STREAM_STALL_TIMEOUT_MS } from "../config/runtimeConfig.js";
-import { dbg, isDebugEnabled } from "./debugLog.js";
+import { dbg, trace, isDebugEnabled } from "./debugLog.js";
 
 // Get HH:MM:SS timestamp
 function getTimeString() {
@@ -37,9 +37,10 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
       if (disconnected) return;
       disconnected = true;
 
-      // Debug-only: Responses API has no [DONE] sentinel, so codex/droid close the
-      // socket on every completed request. "📊 done" is the authoritative outcome line.
-      dbg("CTRL", `${provider}/${model} | disconnect=${reason} | dur=${Date.now() - startTime}ms`);
+      // Responses API has no [DONE] sentinel, so codex/droid close the socket on
+      // every completed request. "complete" is the authoritative outcome line —
+      // this one explains *why* the stream ended early.
+      trace("CTRL", `${provider}/${model} | client/disconnect=${reason} | dur=${Date.now() - startTime}ms`);
 
       abortController.abort();
 
@@ -93,6 +94,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
     try {
       const bytes = onAbortTerminal();
       if (bytes) controller.enqueue(bytes);
+      trace("OUT", `terminal error frame emitted (${(bytes?.length ?? bytes?.byteLength ?? 0)}B) after abnormal end`);
     } catch { /* best-effort terminal */ }
   };
 
@@ -123,6 +125,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
     async pull(controller) {
       if (!streamController.isConnected()) {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
+        trace("OUT", "downstream pull after disconnect → emit terminal + close");
         emitTerminal(controller);
         controller.close();
         return;
@@ -133,6 +136,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
 
         if (done) {
           if (heartbeatTimer) clearInterval(heartbeatTimer);
+          trace("OUT", "transform stream drained (upstream EOF) → close downstream");
           streamController.handleComplete();
           controller.close();
           return;
@@ -168,9 +172,11 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         // (Responses passthrough prefers response.failed + [DONE] over a raw transport error)
         try {
           if (!wasConnected || isNetworkClose || onAbortTerminal) {
+            trace("ERR", `read failed → graceful close | name=${error?.name} | msg=${msg || "(none)"} | code=${code || "-"} | wasConnected=${wasConnected} | controllerClosed=${isControllerClosed} | networkClose=${isNetworkClose}`);
             emitTerminal(controller);
             controller.close();
           } else {
+            trace("ERR", `read failed → downstream error | name=${error?.name} | msg=${msg || "(none)"} | code=${code || "-"}`);
             controller.error(error);
           }
         } catch (e) { /* already closed or cancelled */ }
@@ -179,6 +185,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
 
     cancel(reason) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      trace("OUT", `downstream stream cancelled | reason=${reason || "cancelled"}`);
       streamController.handleDisconnect(reason || "cancelled");
       reader.cancel();
       writer.abort();
@@ -220,7 +227,7 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     stallTimer = setTimeout(() => {
       stallTimer = null;
       abortMessage = "stream stall timeout";
-      dbg(tag, `STALL TIMEOUT ${stallTimeoutMs}ms | chunks=${chunkCount} | bytes=${totalBytes} | sinceLast=${Date.now() - lastChunkAt}ms`);
+      trace(tag, `STALL TIMEOUT ${stallTimeoutMs}ms | chunks=${chunkCount} | bytes=${totalBytes} | sinceLast=${Date.now() - lastChunkAt}ms | dur=${Date.now() - t0}ms`);
       streamController.handleError?.(new Error("stream stall timeout"));
       streamController.abort?.();
     }, stallTimeoutMs);
@@ -233,14 +240,14 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     signal: streamController.signal,
     startTime: streamController.startTime,
     isConnected: () => streamController.isConnected(),
-    handleComplete: () => { dbg(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleComplete(); },
-    handleError: (e) => { dbg(tag, `error: ${e?.message} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleError(e); },
-    handleDisconnect: (r) => { dbg(tag, `disconnect: ${r} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleDisconnect(r); },
+    handleComplete: () => { trace(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleComplete(); },
+    handleError: (e) => { trace(tag, `error: ${e?.message} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleError(e); },
+    handleDisconnect: (r) => { trace(tag, `disconnect: ${r} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleDisconnect(r); },
     abort: () => { clearStall(); streamController.abort(); }
   };
 
   armStall();
-  dbg(tag, `pipe start | stallTimeout=${stallTimeoutMs}ms`);
+  trace(tag, `pipe start | stallTimeout=${stallTimeoutMs}ms`);
 
   const upstreamTap = new TransformStream({
     transform(chunk, controller) {
@@ -250,13 +257,17 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
       const now = Date.now();
       const gap = now - lastChunkAt;
       lastChunkAt = now;
-      if (isDebugEnabled && (chunkCount <= 5 || chunkCount % 20 === 0 || gap > 5000)) {
+      // First upstream byte is the reliable TTFT signal for diagnosing
+      // "stuck before any output" vs "stopped after N bytes".
+      if (chunkCount === 1) {
+        trace(tag, `first upstream chunk | ttft=${now - t0}ms | size=${sz}B`);
+      } else if (isDebugEnabled && (chunkCount <= 5 || chunkCount % 20 === 0 || gap > 5000)) {
         dbg(tag, `chunk #${chunkCount} | size=${sz}B | gap=${gap}ms | total=${totalBytes}B`);
       }
       armStall();
       controller.enqueue(chunk);
     },
-    flush() { dbg(tag, `upstream EOF | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); }
+    flush() { trace(tag, `upstream EOF | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); }
   });
 
   const transformedBody = providerResponse.body

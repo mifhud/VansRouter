@@ -545,10 +545,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // any useful content frame. Transient upstream glitch — retry once on the
     // SAME connection without marking it unavailable. The finally block above
     // already released the semaphore slot; the loop will re-acquire on re-entry.
-    if (result.errorCode === "STREAM_EARLY_EOF" && streamEarlyEofRetries < 1) {
-      streamEarlyEofRetries++;
-      log.warn("STREAM", `${provider}/${model} closed stream before useful content — retrying once (attempt ${streamEarlyEofRetries})`);
-      continue;
+    if (result.errorCode === "STREAM_EARLY_EOF") {
+      if (streamEarlyEofRetries < 1) {
+        streamEarlyEofRetries++;
+        log.warn("STREAM", `${provider}/${model} closed stream before useful content — retrying once (attempt ${streamEarlyEofRetries}, conn ${credentials.connectionName || credentials.connectionId})`);
+        continue;
+      }
+      log.warn("STREAM", `${provider}/${model} STREAM_EARLY_EOF retry exhausted — forwarding error to client (no more retries)`);
     }
 
     // Normalize result.error to a string before passing to pattern matchers.

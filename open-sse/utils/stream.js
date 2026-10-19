@@ -4,13 +4,19 @@ import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, hasZeroCompletionWithContent, fixZeroCompletionUsage, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
-import { dbg, isDebugEnabled } from "./debugLog.js";
+import { dbg, trace, isDebugEnabled } from "./debugLog.js";
 import { extractToolNames, fuzzyMatchToolName } from "../translator/concerns/toolCall.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
 
 export { COLORS, formatSSE };
 export { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER };
+
+// Native tool-call markup some models emit as *plain text* instead of structured
+// tool_calls (e.g. `<tool_call>shell<arg_key>cmd</arg_key><arg_value>…`). A client
+// agent never executes this — it just sees prose and its turn ends. Detect it so
+// the dashboard shows the provider/model responsible.
+const TOOL_MARKUP_RE = /<tool_call>|<\/tool_call>|<arg_key>|<arg_value>|<tool_calls>|<\/tool_calls>|<function_call>|<\/function_call>|<\|tool_call\|>|\[TOOL_CALLS\]/i;
 
 /**
  * Build an OpenAI-style SSE chunk that exposes structured tool_calls.
@@ -127,6 +133,13 @@ export function createSSEStream(options = {}) {
   let sseEmittedCount = 0;
   const eventTypeCounts = {};
 
+  // Completion tracking for truncation diagnostics: did the provider announce a
+  // natural stop (finish_reason / terminal event), and did it produce structured
+  // tool_calls (vs. leaking tool markup as text)?
+  let finishSeen = false;
+  let stopReason = null;
+  let sawStructuredToolCalls = false;
+
   // Track native Kimi tool-call markup that leaks into streaming content.
   // When detected, a synthetic tool_calls chunk is emitted before [DONE].
   const isKimiModel = /kimi-k2\./i.test(model || "");
@@ -166,6 +179,17 @@ export function createSSEStream(options = {}) {
       appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
     }
 
+    // Lifecycle summary — the single line that tells you how a stream ended.
+    trace("DONE", `${provider}/${model} | mode=${isPassthrough ? "passthrough" : "translate"} | frames=${sseEmittedCount} | contentChars=${totalContentLength} | thinkingChars=${accumulatedThinking.length} | finishSeen=${finishSeen}${stopReason ? ` (${stopReason})` : ""} | toolCalls=${sawStructuredToolCalls} | usage=${hasValidUsage(finalUsage) ? `${finalUsage.prompt_tokens ?? "?"}/${finalUsage.completion_tokens ?? "?"}` : "none"}`);
+
+    if (!finishSeen && (sseEmittedCount > 0 || totalContentLength > 0)) {
+      trace("DONE", `WARN truncated — upstream ended with no finish_reason/terminal after ${sseEmittedCount} frames (${totalContentLength} chars); client may hang waiting for completion`);
+    }
+    if (!sawStructuredToolCalls && accumulatedContent && TOOL_MARKUP_RE.test(accumulatedContent)) {
+      const match = accumulatedContent.match(TOOL_MARKUP_RE);
+      trace("DONE", `WARN tool-call markup leaked as text (${match?.[0]}) — model did not emit structured tool_calls; client will not execute it | ${provider}/${model}`);
+    }
+
     if (onStreamComplete) {
       onStreamComplete({
         content: accumulatedContent,
@@ -200,9 +224,10 @@ export function createSSEStream(options = {}) {
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (isDebugEnabled && trimmed) {
+        // Always count lines (cheap) so the flush summary is meaningful in production.
+        if (trimmed) {
           sseLineCount++;
-          if (trimmed.startsWith("event:")) {
+          if (isDebugEnabled && trimmed.startsWith("event:")) {
             const evt = trimmed.slice(6).trim();
             eventTypeCounts[evt] = (eventTypeCounts[evt] || 0) + 1;
           }
@@ -333,8 +358,15 @@ export function createSSEStream(options = {}) {
               }
 
               responsesTerminal = isOpenAIResponsesTerminalEvent(currentOpenAIResponsesEvent, parsed);
+              if (responsesTerminal) { finishSeen = true; stopReason = stopReason || (currentOpenAIResponsesEvent || "responses-terminal"); }
+              if (Array.isArray(parsed.choices)) {
+                for (const c of parsed.choices) {
+                  if (Array.isArray(c?.delta?.tool_calls) && c.delta.tool_calls.length > 0) sawStructuredToolCalls = true;
+                }
+              }
 
               const isFinishChunk = parsed.choices?.[0]?.finish_reason;
+              if (isFinishChunk) { finishSeen = true; stopReason = String(isFinishChunk); }
               if (isFinishChunk && !hasValidUsage(parsed.usage)) {
                 const estimated = estimateUsage(body, totalContentLength, FORMATS.OPENAI);
                 parsed.usage = filterUsageForFormat(estimated, FORMATS.OPENAI);
@@ -377,6 +409,7 @@ export function createSSEStream(options = {}) {
 
           reqLogger?.appendConvertedChunk?.(output);
           controller.enqueue(sharedEncoder.encode(output));
+          sseEmittedCount++;
           // Responses clients (codex CLI) close on response.completed instead of [DONE]
           if (responsesTerminal) finalizeStream();
           continue;
@@ -397,6 +430,22 @@ export function createSSEStream(options = {}) {
 
         if (isOpenAIResponsesStream && isOpenAIResponsesTerminalEvent(openAIResponsesEventName, parsed)) {
           openAIResponsesTerminalSeen = true;
+        }
+
+        // Natural-completion + structured-tool-call tracking (diagnostics only).
+        if (parsed.choices?.[0]?.finish_reason) { finishSeen = true; stopReason = String(parsed.choices[0].finish_reason); }
+        else if (parsed.delta?.stop_reason) { finishSeen = true; stopReason = String(parsed.delta.stop_reason); }
+        else if (parsed.candidates?.[0]?.finishReason) { finishSeen = true; stopReason = String(parsed.candidates[0].finishReason); }
+        else if (parsed.done) { finishSeen = true; stopReason = stopReason || "done"; }
+        if (openAIResponsesTerminalSeen) { finishSeen = true; stopReason = stopReason || "responses-terminal"; }
+        if (Array.isArray(parsed.choices)) {
+          for (const c of parsed.choices) {
+            if (Array.isArray(c?.delta?.tool_calls) && c.delta.tool_calls.length > 0) sawStructuredToolCalls = true;
+          }
+        }
+        if (parsed.content_block?.type === "tool_use" || parsed.delta?.type === "input_json_delta") sawStructuredToolCalls = true;
+        if (Array.isArray(parsed.content)) {
+          for (const blk of parsed.content) if (blk?.type === "tool_use") sawStructuredToolCalls = true;
         }
 
         // For Ollama: done=true is the final chunk with finish_reason/usage, must translate
@@ -539,6 +588,19 @@ export function createSSEStream(options = {}) {
           for (const item of translated) {
             if (item === null || item === undefined) continue;
 
+            // Diagnostics: did the translated output actually carry structured tool calls?
+            if (Array.isArray(item.choices)) {
+              for (const c of item.choices) {
+                if (Array.isArray(c?.delta?.tool_calls) && c.delta.tool_calls.length > 0) sawStructuredToolCalls = true;
+                if (Array.isArray(c?.message?.tool_calls) && c.message.tool_calls.length > 0) sawStructuredToolCalls = true;
+                if (Array.isArray(c?.delta?.content)) {
+                  for (const blk of c.delta.content) if (blk?.type === "tool_use" || blk?.type === "tool_call") sawStructuredToolCalls = true;
+                }
+              }
+            }
+            if (item.content_block?.type === "tool_use") sawStructuredToolCalls = true;
+            if (item.delta?.stop_reason && !finishSeen) { finishSeen = true; stopReason = String(item.delta.stop_reason); }
+
             // If native Kimi tool calls were detected in this chunk stream and
             // this is the finish chunk, replace it with a structured tool_calls
             // chunk so the client sees the correct finish_reason.
@@ -598,7 +660,7 @@ export function createSSEStream(options = {}) {
 
     flush(controller) {
       const evtSummary = Object.entries(eventTypeCounts).map(([k, v]) => `${k}=${v}`).join(",") || "none";
-      dbg("SSE", `flush | provider=${provider} | model=${model} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | events=[${evtSummary}]`);
+      trace("SSE", `flush | provider=${provider} | model=${model} | mode=${mode} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | contentChars=${totalContentLength} | finishSeen=${finishSeen} | events=[${evtSummary}]`);
       trackPendingRequest(model, provider, connectionId, false);
       try {
         const remaining = decoder.decode();
@@ -612,6 +674,7 @@ export function createSSEStream(options = {}) {
             }
             reqLogger?.appendConvertedChunk?.(output);
             controller.enqueue(sharedEncoder.encode(output));
+            sseEmittedCount++;
           }
 
           // IMPORTANT: In passthrough mode we still must terminate the SSE stream.
@@ -703,6 +766,7 @@ export function createSSEStream(options = {}) {
         // Synthesize response.failed if a Responses passthrough stream never reached a terminal event
         const keepsOpenAIResponsesFormat = targetFormat === FORMATS.OPENAI_RESPONSES && sourceFormat === FORMATS.OPENAI_RESPONSES;
         if (keepsOpenAIResponsesFormat && !openAIResponsesTerminalSeen) {
+          trace("SSE", `WARN Responses stream ended without terminal event — synthesizing response.failed | ${provider}/${model}`);
           const failedOutput = formatIncompleteOpenAIResponsesStreamFailure();
           reqLogger?.appendConvertedChunk?.(failedOutput);
           controller.enqueue(sharedEncoder.encode(failedOutput));

@@ -11,6 +11,7 @@ import { buildRequestDetail, extractRequestConfig, saveUsageStats } from "./requ
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
+import { trace } from "../../utils/debugLog.js";
 
 const STREAM_EARLY_EOF_STATUS = 502;
 
@@ -94,6 +95,7 @@ const CODEX_SOURCE_TO_TARGET = {
 
 /**
  * Determine which SSE transform stream to use based on provider/format.
+ * Returns { stream, mode } so the lifecycle log can report the chosen routing.
  */
 function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, credentials }) {
   const isDroidCLI = userAgent?.toLowerCase().includes("droid") || userAgent?.toLowerCase().includes("codex-cli");
@@ -104,14 +106,23 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 
   if (needsCodexTranslation) {
     const codexTarget = CODEX_SOURCE_TO_TARGET[sourceFormat] || FORMATS.OPENAI;
-    return createSSETransformStreamWithLogger(FORMATS.OPENAI_RESPONSES, codexTarget, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, isKimiModel ? normalizeKimiToolCalls : null, credentials);
+    return {
+      mode: `codex(${FORMATS.OPENAI_RESPONSES}→${codexTarget})`,
+      stream: createSSETransformStreamWithLogger(FORMATS.OPENAI_RESPONSES, codexTarget, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, isKimiModel ? normalizeKimiToolCalls : null, credentials)
+    };
   }
 
   if (needsTranslation(targetFormat, sourceFormat)) {
-    return createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, isKimiModel ? normalizeKimiToolCalls : null, credentials);
+    return {
+      mode: `translate(${targetFormat}→${sourceFormat})`,
+      stream: createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, isKimiModel ? normalizeKimiToolCalls : null, credentials)
+    };
   }
 
-  return createPassthroughStreamWithLogger(provider, reqLogger, model, connectionId, body, onStreamComplete, apiKey, isKimiModel ? normalizeKimiToolCalls : null);
+  return {
+    mode: `passthrough(${targetFormat})`,
+    stream: createPassthroughStreamWithLogger(provider, reqLogger, model, connectionId, body, onStreamComplete, apiKey, isKimiModel ? normalizeKimiToolCalls : null)
+  };
 }
 
 /**
@@ -138,6 +149,8 @@ export async function handleStreamingResponse({
   // This often means the provider returned an HTML error page or plain-text error
   // that the SSE transform stream would forward as garbage to the client.
   const upstreamContentType = (providerResponse.headers.get('content-type') || '').toLowerCase();
+  const upstreamContentLength = providerResponse.headers.get('content-length') || '-';
+  trace("RES", `${provider}/${model} | upstream HTTP ${providerResponse.status} | ct=${upstreamContentType || 'none'} | cl=${upstreamContentLength} | transfer=${providerResponse.headers.get('transfer-encoding') || '-'}`);
   if (upstreamContentType && !upstreamContentType.includes('text/event-stream') && !upstreamContentType.includes('application/json')) {
     console.warn('[STREAM] ' + provider + ' | ' + model + ' | unexpected Content-Type: ' + upstreamContentType);
   }
@@ -145,10 +158,12 @@ export async function handleStreamingResponse({
   // Readiness gate: peek the first chunk before committing to the streaming
   // response. If upstream closes before any byte arrives, signal STREAM_EARLY_EOF
   // so chat.js can retry once on the same connection without marking it down.
+  const peekStartedAt = Date.now();
   let peek;
   try {
     peek = await peekStreamReadiness(providerResponse.body);
   } catch (error) {
+    trace("PEEK", `${provider}/${model} | upstream body unavailable after ${Date.now() - peekStartedAt}ms: ${error?.message || error}`);
     return {
       success: false,
       status: 502,
@@ -156,8 +171,10 @@ export async function handleStreamingResponse({
       error: error?.message || String(error)
     };
   }
+  trace("PEEK", `${provider}/${model} | empty=${!!peek.empty} | unpeeked=${!!peek.unpeeked} | firstBytes=${peek.firstChunk?.byteLength ?? peek.firstChunk?.length ?? 0} | waited=${Date.now() - peekStartedAt}ms`);
 
   if (peek.empty) {
+    trace("PEEK", `${provider}/${model} | STREAM_EARLY_EOF — upstream closed before any content frame`);
     return {
       success: false,
       status: STREAM_EARLY_EOF_STATUS,
@@ -166,7 +183,8 @@ export async function handleStreamingResponse({
     };
   }
 
-  const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, credentials });
+  const built = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, credentials });
+  const transformStream = built.stream;
 
   // Terminal bytes when the stream aborts after HTTP 200 was already sent, so the
   // client sees a real error instead of a silently truncated stream.
@@ -182,6 +200,7 @@ export async function handleStreamingResponse({
     statusText: providerResponse.statusText,
     headers: providerResponse.headers
   });
+  trace("PIPE", `${provider}/${model} | mode=${built.mode} | stall=${stallTimeoutMs}ms | clientFmt=${sourceFormat}`);
   const transformedBody = pipeWithDisconnect(reconstructedResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
 
   saveRequestDetail(buildRequestDetail({
