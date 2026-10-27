@@ -61,6 +61,31 @@ export function hasNativeToolMarkup(content) {
 }
 
 /**
+ * Coerce an `<arg_value>` payload to the type the model meant.
+ *
+ * Free models emit structured values verbatim — `paths` as a JSON array, nested
+ * options as a JSON object. Forcing those into a string makes the client reject
+ * the recovered call ("expected array, got string"). Only JSON *containers* are
+ * coerced: scalars stay strings so a shell command such as `123`, `true` or
+ * `[ -f x ] && ls` is never retyped.
+ *
+ * @param {string} raw
+ * @returns {string|object|Array}
+ */
+function coerceArgValue(raw) {
+  const value = typeof raw === "string" ? raw : String(raw ?? "");
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Not JSON after all (e.g. a shell test expression) — keep the raw text.
+    }
+  }
+  return value;
+}
+
+/**
  * Parse one `<tool_call>…` block body into { name, arguments }.
  * Returns null when no tool name can be recovered.
  */
@@ -81,7 +106,7 @@ function parseTagBlock(body) {
   const are = new RegExp(ARG_PAIR_RE.source, "gi");
   let am;
   while ((am = are.exec(body)) !== null) {
-    args[am[1]] = am[2];
+    args[am[1]] = coerceArgValue(am[2]);
   }
 
   // Truncated stream: the block was cut before `</arg_value>`. Capture the tail
@@ -90,7 +115,7 @@ function parseTagBlock(body) {
   if (Object.keys(args).length === 0 && argStart !== -1) {
     const lenient = /<arg_key>\s*([\s\S]*?)\s*<\/arg_key>\s*<arg_value>\s*([\s\S]*)$/i.exec(body);
     if (lenient) {
-      args[lenient[1]] = lenient[2].replace(/<\/arg_value>\s*$/i, "");
+      args[lenient[1]] = coerceArgValue(lenient[2].replace(/<\/arg_value>\s*$/i, ""));
     }
   }
 

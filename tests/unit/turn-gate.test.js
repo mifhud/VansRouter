@@ -54,10 +54,22 @@ describe("classifyTurnLine", () => {
     expect(classifyTurnLine(`data: {"choices":[{"delta":{"content":"   "}}]}`)).toBe("hold");
   });
 
-  it("treats a structured tool_calls delta as usable", () => {
+  it("reports a structured tool_calls delta as a tool call", () => {
     expect(
       classifyTurnLine(`data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"shell"}}]}}]}`)
-    ).toBe("usable");
+    ).toBe("tool");
+  });
+
+  it("reports Claude tool_use and Gemini functionCall as tool calls", () => {
+    expect(
+      classifyTurnLine(`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"shell"}}`)
+    ).toBe("tool");
+    expect(
+      classifyTurnLine(`data: {"type":"content_block_delta","delta":{"partial_json":"x"}}`)
+    ).toBe("tool");
+    expect(
+      classifyTurnLine(`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"shell"}}]}}]}`)
+    ).toBe("tool");
   });
 
   it("treats the assistant role frame and [DONE] as not usable", () => {
@@ -171,7 +183,59 @@ describe("gateTurn", () => {
   });
 });
 
+describe("gateTurn with requireToolCall", () => {
+  const toolFrame = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\\"cmd\\":\\"ls\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n`;
+
+  it("rejects a prose-only turn (agent has nothing to execute)", async () => {
+    const text = frame({ role: "assistant" }) + frame({ content: "Saya akan cek dulu." }) + frame({}, "stop") + "data: [DONE]\n\n";
+    const gate = await gateTurn(sseResponse(text), { requireToolCall: true });
+    expect(gate.usable).toBe(false);
+    expect(gate.reason).toBe("no-tool-call");
+    expect(gate.sawToolCall).toBe(false);
+    // Nothing is lost: the caller can still return this response as-is.
+    expect(await readAll(gate.response)).toBe(text);
+  });
+
+  it("accepts a turn as soon as a tool call appears", async () => {
+    const text = frame({ role: "assistant" }) + frame({ content: "Saya cek dulu." }) + toolFrame + "data: [DONE]\n\n";
+    const gate = await gateTurn(sseResponse(text), { requireToolCall: true });
+    expect(gate.usable).toBe(true);
+    expect(gate.reason).toBe("tool-call");
+    expect(gate.sawToolCall).toBe(true);
+    expect(await readAll(gate.response)).toBe(text);
+  });
+
+  it("commits instead of buffering when the content cap is reached", async () => {
+    const text = frame({ role: "assistant" }) + frame({ content: "x".repeat(400) }) + frame({}, "stop");
+    const gate = await gateTurn(sseResponse(text), { requireToolCall: true, toolCallMaxBytes: 128 });
+    expect(gate.usable).toBe(true);
+    expect(gate.reason).toBe("byte-cap");
+    expect(gate.sawToolCall).toBe(false);
+  });
+
+  it("commits a long slow turn when the tool-call wait cap expires", async () => {
+    let controller;
+    const stream = new ReadableStream({ start(c) { controller = c; } });
+    const response = new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    const gate = await gateTurn(response, { requireToolCall: true, toolCallWaitMs: 40, maxWaitMs: 5000 });
+    expect(gate.usable).toBe(true);
+    expect(gate.reason).toBe("wait-cap");
+    controller.close();
+  });
+
+  it("keeps the old content-is-enough behaviour when not required", async () => {
+    const text = frame({ role: "assistant" }) + frame({ content: "jawaban" }) + frame({}, "stop");
+    const gate = await gateTurn(sseResponse(text));
+    expect(gate.usable).toBe(true);
+    expect(gate.reason).toBe("usable");
+    expect(gate.sawToolCall).toBe(false);
+  });
+});
+
 describe("combo unusable-turn retry", () => {
+  const toolTurn =
+    frame({ tool_calls: [{ id: "call_1", type: "function", function: { name: "shell", arguments: "{}" } }] }, "tool_calls") +
+    "data: [DONE]\n\n";
   const bodyWithTools = {
     messages: [{ role: "user", content: "list files" }],
     tools: [{ type: "function", function: { name: "shell", parameters: {} } }],
@@ -179,7 +243,9 @@ describe("combo unusable-turn retry", () => {
 
   it("falls through to the next model when the first returns an empty turn", async () => {
     const emptyTurn = frame({ role: "assistant" }) + frame({}, "stop") + "data: [DONE]\n\n";
-    const goodTurn = frame({ role: "assistant", content: "done" }) + frame({}, "stop") + "data: [DONE]\n\n";
+    // The recovering model must produce something the agent can act on: for a
+    // tool-declared request that means a tool call, not just prose.
+    const goodTurn = frame({ role: "assistant", content: "done" }) + toolTurn;
 
     const handleSingleModel = vi.fn(async (_body, model) =>
       model === "a/empty" ? sseResponse(emptyTurn) : sseResponse(goodTurn)
@@ -236,9 +302,67 @@ describe("combo unusable-turn retry", () => {
     expect(await readAll(res)).toContain("[DONE]");
   });
 
+  it("retries once when a tool-declared turn ends with prose and no tool call", async () => {
+    const proseTurn = frame({ role: "assistant", content: "Berikut rencananya..." }) + frame({}, "stop") + "data: [DONE]\n\n";
+    const handleSingleModel = vi.fn(async (_body, model) =>
+      model === "a/prose" ? sseResponse(proseTurn) : sseResponse(proseTurn)
+    );
+
+    const res = await handleComboChat({
+      body: bodyWithTools,
+      models: ["a/prose", "b/prose", "c/prose"],
+      handleSingleModel,
+      log,
+      comboName: "no-tool-combo",
+      comboStrategy: "fallback",
+    });
+
+    // Exactly one extra attempt: a legitimate final answer must not be replayed
+    // through every model in the list.
+    expect(handleSingleModel).toHaveBeenCalledTimes(2);
+    expect(res.ok).toBe(true);
+    // The turn is still delivered, so nothing is lost when no model calls a tool.
+    expect(await readAll(res)).toContain("Berikut rencananya");
+  });
+
+  it("stops retrying as soon as a model calls a tool", async () => {
+    const proseTurn = frame({ role: "assistant", content: "rencana" }) + frame({}, "stop") + "data: [DONE]\n\n";
+    const handleSingleModel = vi.fn(async (_body, model) =>
+      model === "a/prose" ? sseResponse(proseTurn) : sseResponse(toolTurn)
+    );
+
+    const res = await handleComboChat({
+      body: bodyWithTools,
+      models: ["a/prose", "b/tool"],
+      handleSingleModel,
+      log,
+      comboName: "tool-combo",
+      comboStrategy: "fallback",
+    });
+
+    expect(handleSingleModel).toHaveBeenCalledTimes(2);
+    expect(await readAll(res)).toContain("tool_calls");
+  });
+
+  it("does not retry a tool-declared turn that already has a tool call", async () => {
+    const handleSingleModel = vi.fn(async () => sseResponse(toolTurn));
+
+    const res = await handleComboChat({
+      body: bodyWithTools,
+      models: ["a/tool", "b/tool"],
+      handleSingleModel,
+      log,
+      comboName: "tool-only-combo",
+      comboStrategy: "fallback",
+    });
+
+    expect(handleSingleModel).toHaveBeenCalledTimes(1);
+    expect(res.ok).toBe(true);
+  });
+
   it("keeps the recovering model's selected-connection header", async () => {
     const emptyTurn = frame({ role: "assistant" }) + frame({}, "stop") + "data: [DONE]\n\n";
-    const goodTurn = frame({ role: "assistant", content: "ok" }) + frame({}, "stop") + "data: [DONE]\n\n";
+    const goodTurn = frame({ role: "assistant", content: "ok" }) + toolTurn;
 
     const handleSingleModel = vi.fn(async (_body, model) =>
       model === "a/empty"

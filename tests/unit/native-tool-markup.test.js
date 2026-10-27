@@ -75,6 +75,36 @@ describe("extractNativeToolCalls — tag style", () => {
     expect(JSON.parse(calls[0].function.arguments)).toEqual({ cmd: "unterminated" });
   });
 
+  it("keeps JSON arrays/objects typed instead of stringifying them", () => {
+    const calls = extractNativeToolCalls(
+      '<tool_call>list<arg_key>paths</arg_key><arg_value>["src","lib"]</arg_value></tool_call>'
+    );
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ paths: ["src", "lib"] });
+  });
+
+  it("keeps nested object values typed", () => {
+    const calls = extractNativeToolCalls(
+      '<tool_call>configure<arg_key>options</arg_key><arg_value>{"port":38887,"tls":false}</arg_value></tool_call>'
+    );
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({
+      options: { port: 38887, tls: false },
+    });
+  });
+
+  it("does not retype plain strings that merely start with a bracket", () => {
+    const calls = extractNativeToolCalls(
+      "<tool_call>shell<arg_key>cmd</arg_key><arg_value>[ -f x ] && ls</arg_value></tool_call>"
+    );
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ cmd: "[ -f x ] && ls" });
+  });
+
+  it("does not retype numeric-looking strings", () => {
+    const calls = extractNativeToolCalls(
+      "<tool_call>shell<arg_key>cmd</arg_key><arg_value>123</arg_value></tool_call>"
+    );
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ cmd: "123" });
+  });
+
   it("ignores a stray leaked closing fragment", () => {
     expect(extractNativeToolCalls("fungsi</arg_value>")).toEqual([]);
   });

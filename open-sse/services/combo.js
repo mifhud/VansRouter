@@ -7,7 +7,7 @@ import { unavailableResponse } from "../utils/error.js";
 import { DEFAULT_COMBO_TARGET_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
-import { COMBO_MAX_RETRIES, COMBO_RETRY_DELAY_MS, COMBO_UNUSABLE_BUDGET_MS } from "../config/runtimeConfig.js";
+import { COMBO_MAX_RETRIES, COMBO_RETRY_DELAY_MS, COMBO_UNUSABLE_BUDGET_MS, COMBO_NO_TOOL_CALL_RETRIES } from "../config/runtimeConfig.js";
 import { gateTurn } from "./turnGate.js";
 import { HIGHLY_RETRY_ERRONEOUS_400_KEYWORDS } from "../config/errorConfig.js";
 /**
@@ -369,14 +369,16 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   const infinite = maxRetries < 0;
   let cycle = 0;
 
-  // Agentic turns (requests that declare tools) must produce usable output:
-  // an empty or markup-only turn makes the client agent stop mid-way. Gate each
-  // 2xx response before committing it, and fall through to the next model when
-  // it carries nothing the agent can act on. Bounded to one pass over the model
-  // list and a total time budget so an infinite combo cannot spin forever.
-  const requireUsableTurn = Array.isArray(body?.tools) && body.tools.length > 0;
+  // Agentic turns (requests that declare tools) must produce output the client
+  // agent can act on: empty turns and prose-without-a-tool-call both make the
+  // agent stop mid-way. Gate each 2xx response before committing it and fall
+  // through to the next model. Bounded to one pass over the model list (and one
+  // extra attempt for a missing tool call) plus a total time budget so an
+  // infinite combo cannot spin forever.
+  const agenticTurn = Array.isArray(body?.tools) && body.tools.length > 0;
   const unusableDeadline = Date.now() + COMBO_UNUSABLE_BUDGET_MS;
   let unusableRetries = 0;
+  let noToolCallRetries = 0;
 
   while (infinite || cycle <= maxRetries) {
     if (cycle > 0) {
@@ -447,16 +449,20 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         // Success (2xx) - return response immediately, unless the turn carries
         // nothing the client agent can act on.
         if (result.ok) {
-          if (requireUsableTurn) {
-            const gate = await gateTurn(result);
+          if (agenticTurn) {
+            const gate = await gateTurn(result, { requireToolCall: true });
             if (!gate.usable) {
-              const canRetry = unusableRetries + 1 < rotatedModels.length && Date.now() < unusableDeadline;
+              const missingToolCall = gate.reason === "no-tool-call";
+              const canRetry = missingToolCall
+                ? noToolCallRetries < COMBO_NO_TOOL_CALL_RETRIES && Date.now() < unusableDeadline
+                : unusableRetries + 1 < rotatedModels.length && Date.now() < unusableDeadline;
               log.warn(
                 "COMBO",
-                `Model ${modelStr} returned an unusable turn (${gate.reason})${canRetry ? " — trying next model" : " — returning it (retry budget exhausted)"}`
+                `Model ${modelStr} returned a turn the agent cannot act on (${gate.reason})${canRetry ? " — trying next model" : " — returning it (retry budget exhausted)"}`
               );
               if (canRetry) {
-                unusableRetries++;
+                if (missingToolCall) noToolCallRetries++;
+                else unusableRetries++;
                 continue;
               }
               return gate.response;

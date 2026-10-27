@@ -163,6 +163,20 @@ export const TURN_GATE_MAX_WAIT_MS = envIntSigned("TURN_GATE_MAX_WAIT_MS", 90 * 
 // retrying forever. Env: COMBO_UNUSABLE_BUDGET_MS.
 export const COMBO_UNUSABLE_BUDGET_MS = envIntSigned("COMBO_UNUSABLE_BUDGET_MS", 120 * 1000);
 
+// Agentic turns that end with prose and no tool call leave the client agent with
+// nothing to execute. The next model is tried this many times before the turn is
+// committed as-is. Kept small on purpose: a legitimate final answer (also prose,
+// no tool call) must not be replayed through the whole model list.
+// Env: COMBO_NO_TOOL_CALL_RETRIES.
+export const COMBO_NO_TOOL_CALL_RETRIES = envIntSigned("COMBO_NO_TOOL_CALL_RETRIES", 1);
+
+// Bounds for the tool-call wait: content frames are buffered only up to this many
+// bytes / milliseconds, then the turn is committed as a normal (text) answer.
+// 4 KiB covers ~93% of observed no-tool-call turns. Env: TURN_GATE_TOOL_CALL_MAX_BYTES,
+// TURN_GATE_TOOL_CALL_WAIT_MS.
+export const TURN_GATE_TOOL_CALL_MAX_BYTES = envIntSigned("TURN_GATE_TOOL_CALL_MAX_BYTES", 4096);
+export const TURN_GATE_TOOL_CALL_WAIT_MS = envIntSigned("TURN_GATE_TOOL_CALL_WAIT_MS", 20 * 1000);
+
 // While the unusable-turn gate holds substantive frames, it emits its own SSE
 // keep-alive comment at this interval so the client link never looks idle
 // (Nginx proxy_read_timeout defaults to 60s, Cloudflare edges cut at ~100s).

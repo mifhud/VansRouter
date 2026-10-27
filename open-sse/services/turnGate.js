@@ -30,7 +30,13 @@
  * resort.
  */
 
-import { TURN_GATE_MAX_BYTES, TURN_GATE_MAX_WAIT_MS, TURN_GATE_HEARTBEAT_MS } from "../config/runtimeConfig.js";
+import {
+  TURN_GATE_MAX_BYTES,
+  TURN_GATE_MAX_WAIT_MS,
+  TURN_GATE_HEARTBEAT_MS,
+  TURN_GATE_TOOL_CALL_MAX_BYTES,
+  TURN_GATE_TOOL_CALL_WAIT_MS,
+} from "../config/runtimeConfig.js";
 
 const encoder = new TextEncoder();
 
@@ -38,6 +44,7 @@ const KEEPALIVE = ": keep-alive\n\n";
 
 const VERDICT = {
   USABLE: "usable",
+  TOOL: "tool",     // carries a tool call — the turn is actionable
   PASS: "pass",     // forward immediately (inert frame only), not usable on its own
   HOLD: "hold",     // buffer until the verdict is known
 };
@@ -59,15 +66,15 @@ function classifyObject(parsed) {
       const delta = choice?.delta;
       if (delta) {
         if (hasText(delta.content)) return VERDICT.USABLE;
-        if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return VERDICT.USABLE;
+        if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return VERDICT.TOOL;
         if (delta.function_call && (hasText(delta.function_call.name) || hasText(delta.function_call.arguments))) {
-          return VERDICT.USABLE;
+          return VERDICT.TOOL;
         }
       }
       const message = choice?.message;
       if (message) {
         if (hasText(message.content)) return VERDICT.USABLE;
-        if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return VERDICT.USABLE;
+        if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return VERDICT.TOOL;
       }
     }
     return VERDICT.HOLD;
@@ -77,15 +84,19 @@ function classifyObject(parsed) {
   if (typeof parsed.type === "string") {
     if (parsed.type === "content_block_delta") {
       const delta = parsed.delta || {};
-      if (hasText(delta.text) || hasText(delta.partial_json)) return VERDICT.USABLE;
+      if (hasText(delta.partial_json)) return VERDICT.TOOL;
+      if (hasText(delta.text)) return VERDICT.USABLE;
       return VERDICT.HOLD;
     }
     if (parsed.type === "content_block_start") {
-      return parsed.content_block?.type === "tool_use" ? VERDICT.USABLE : VERDICT.HOLD;
+      return parsed.content_block?.type === "tool_use" ? VERDICT.TOOL : VERDICT.HOLD;
     }
     // OpenAI Responses API (codex).
     if (parsed.type.startsWith("response.")) {
-      if (hasText(parsed.delta) || hasText(parsed.arguments) || hasText(parsed.arguments_delta)) return VERDICT.USABLE;
+      if (parsed.type === "response.function_call_arguments.delta") return VERDICT.TOOL;
+      if (hasText(parsed.arguments) || hasText(parsed.arguments_delta)) return VERDICT.TOOL;
+      if (parsed.item?.type === "function_call") return VERDICT.TOOL;
+      if (hasText(parsed.delta)) return VERDICT.USABLE;
       return VERDICT.HOLD;
     }
     // message_start / message_stop / ping / error / … — not usable on their own,
@@ -97,7 +108,8 @@ function classifyObject(parsed) {
   if (Array.isArray(parsed.candidates)) {
     for (const candidate of parsed.candidates) {
       for (const part of candidate?.content?.parts || []) {
-        if (hasText(part?.text) || part?.functionCall) return VERDICT.USABLE;
+        if (part?.functionCall) return VERDICT.TOOL;
+        if (hasText(part?.text)) return VERDICT.USABLE;
       }
     }
     return VERDICT.HOLD;
@@ -151,14 +163,28 @@ function classifyTurnBody(text) {
  * Gate a streaming response: decide whether it carries usable assistant output.
  *
  * @param {Response} response
- * @param {{ maxBytes?: number, maxWaitMs?: number }} [options]
- * @returns {Promise<{ usable: boolean, reason: string, response: Response }>}
+ * @param {{
+ *   maxBytes?: number, maxWaitMs?: number, heartbeatMs?: number,
+ *   requireToolCall?: boolean, toolCallMaxBytes?: number, toolCallWaitMs?: number
+ * }} [options]
+ *   `requireToolCall` holds content frames until a tool call shows up: an agent
+ *   cannot act on prose alone, so a turn that ends with no tool call is a stalled
+ *   turn the caller may retry. It is bounded by `toolCallMaxBytes`/`toolCallWaitMs`
+ *   so a long (legitimate) prose answer is committed rather than buffered.
+ * @returns {Promise<{ usable: boolean, reason: string, sawToolCall: boolean, response: Response }>}
  *   `response` always carries the (possibly empty) turn, ready to hand to the
  *   client, whether or not the caller decides to retry.
  */
-export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWaitMs = TURN_GATE_MAX_WAIT_MS, heartbeatMs = TURN_GATE_HEARTBEAT_MS } = {}) {
+export async function gateTurn(response, {
+  maxBytes = TURN_GATE_MAX_BYTES,
+  maxWaitMs = TURN_GATE_MAX_WAIT_MS,
+  heartbeatMs = TURN_GATE_HEARTBEAT_MS,
+  requireToolCall = false,
+  toolCallMaxBytes = TURN_GATE_TOOL_CALL_MAX_BYTES,
+  toolCallWaitMs = TURN_GATE_TOOL_CALL_WAIT_MS,
+} = {}) {
   const body = response?.body;
-  if (!body || body.locked) return { usable: true, reason: "no-body", response };
+  if (!body || body.locked) return { usable: true, reason: "no-body", sawToolCall: false, response };
 
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -189,9 +215,15 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
   let remainder = "";
   let pendingRead = null;
   let usable = false;
+  let sawToolCall = false;
+  // Distinguishes "prose but no tool call" (one extra model is tried) from a
+  // completely empty turn (the caller may walk the whole model list).
+  let sawContent = false;
   let reason = "empty-turn";
   let eof = false;
-  const deadline = Date.now() + (maxWaitMs > 0 ? maxWaitMs : 0);
+  const byteCap = requireToolCall ? toolCallMaxBytes : maxBytes;
+  const waitCap = requireToolCall ? toolCallWaitMs : maxWaitMs;
+  const deadline = Date.now() + (waitCap > 0 ? waitCap : 0);
 
   // Hold-safe keep-alive: while frames are buffered the client link would
   // otherwise look idle for the whole hold. Comments are inert to an SSE parser.
@@ -208,7 +240,7 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
   try {
     while (true) {
       const timeLeft = deadline - Date.now();
-      if (maxWaitMs > 0 && timeLeft <= 0) {
+      if (waitCap > 0 && timeLeft <= 0) {
         usable = true;
         reason = "wait-cap";
         break;
@@ -217,7 +249,7 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
       let timer = null;
       const winner = await Promise.race([
         nextChunk().then((value) => ({ value })),
-        maxWaitMs > 0
+        waitCap > 0
           ? new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), timeLeft); })
           : new Promise(() => {}),
       ]);
@@ -258,11 +290,25 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
         }
 
         const verdict = classifyTurnLine(line);
-        if (verdict === VERDICT.USABLE) {
-          // Keep the deciding frame in the replay buffer too — it must be
-          // emitted in order, ahead of any bytes still sitting in `remainder`.
+        // Keep the deciding frame in the replay buffer too — it must be emitted
+        // in order, ahead of any bytes still sitting in `remainder`.
+        if (verdict === VERDICT.TOOL) {
+          sawToolCall = true;
           held.push(withTerminator);
           heldBytes += withTerminator.length;
+          usable = true;
+          reason = "tool-call";
+          break;
+        }
+        if (verdict === VERDICT.USABLE) {
+          sawContent = true;
+          held.push(withTerminator);
+          heldBytes += withTerminator.length;
+          if (requireToolCall) {
+            // Hold prose until a tool call shows up (bounded by the caps below):
+            // content alone means the agent may have nothing to act on.
+            continue;
+          }
           usable = true;
           reason = "usable";
           break;
@@ -280,7 +326,7 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
       // A trailing newline-less frame (e.g. a non-SSE JSON body) is classified
       // at EOF, not here.
       if (usable) break;
-      if (heldBytes > maxBytes) {
+      if (heldBytes > byteCap) {
         usable = true;
         reason = "byte-cap";
         break;
@@ -300,18 +346,26 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
     const tail = remainder;
     remainder = "";
     const verdict = tail.startsWith(":") ? VERDICT.PASS : classifyTurnBody(tail);
-    if (verdict === VERDICT.USABLE) {
+    if (verdict === VERDICT.TOOL) {
+      sawToolCall = true;
       usable = true;
-      reason = "usable";
-    }
-    if (verdict === VERDICT.PASS) {
+      reason = "tool-call";
+      held.push(tail);
+    } else if (verdict === VERDICT.PASS) {
       send(tail);
     } else {
       held.push(tail);
       heldBytes += tail.length;
+      if (verdict === VERDICT.USABLE) {
+        sawContent = true;
+        if (!requireToolCall) {
+          usable = true;
+          reason = "usable";
+        }
+      }
     }
   }
-  if (eof && !usable) reason = "empty-turn";
+  if (eof && !usable) reason = requireToolCall && sawContent ? "no-tool-call" : "empty-turn";
 
   // Commit: replay everything we held, in order, followed by any bytes we had
   // already decoded but not yet line-processed.
@@ -348,5 +402,5 @@ export async function gateTurn(response, { maxBytes = TURN_GATE_MAX_BYTES, maxWa
     headers: new Headers(response.headers),
   });
 
-  return { usable, reason, response: gated };
+  return { usable, reason, sawToolCall, response: gated };
 }
